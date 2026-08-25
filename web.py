@@ -5,12 +5,17 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from scipy.optimize import minimize
 import numpy_financial as npf
+import matplotlib.font_manager as fm
 import warnings
 import io
 
 warnings.filterwarnings('ignore')
 
-plt.rcParams['font.sans-serif'] = ['WenQuanYi Zen Hei', 'SimHei', 'sans-serif']
+font_path = "simhei.ttf" 
+if os.path.exists(font_path):
+    fm.fontManager.addfont(font_path)
+
+plt.rcParams['font.sans-serif'] = ['SimHei', 'sans-serif']
 plt.rcParams['axes.unicode_minus'] = False
 
 
