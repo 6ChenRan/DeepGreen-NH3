@@ -10,7 +10,7 @@ import io
 
 warnings.filterwarnings('ignore')
 
-plt.rcParams['font.sans-serif'] = ['SimHei']
+plt.rcParams['font.sans-serif'] = ['WenQuanYi Zen Hei', 'SimHei', 'sans-serif']
 plt.rcParams['axes.unicode_minus'] = False
 
 
