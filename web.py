@@ -1,57 +1,55 @@
-import os
-import io
-import warnings
 import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
-import matplotlib.font_manager as fm
 from scipy.optimize import minimize
 import numpy_financial as npf
+import warnings
+import io
 
 warnings.filterwarnings('ignore')
 
-# 强制加载同目录下的字体文件，绕过系统缓存
-font_path = "simhei.ttf"
-if os.path.exists(font_path):
-    fm.fontManager.addfont(font_path)
-
-plt.rcParams['font.sans-serif'] = ['SimHei', 'WenQuanYi Zen Hei', 'sans-serif']
+plt.rcParams['font.sans-serif'] = ['SimHei']
 plt.rcParams['axes.unicode_minus'] = False
+
 
 st.set_page_config(page_title="柔性绿氨全生命周期智能规划平台", layout="wide", page_icon="🌱")
 
+
 st.markdown("""
 <style>
+    /* 主标题与副标题 */
     .main-title { text-align: center; margin-bottom: 0px !important; padding-bottom: 0px !important; }
     .sub-title { text-align: center; color: #888888; margin-top: 5px !important; font-weight: 300; font-size: 18px; }
+
+    /* 模块简介说明文字 */
     .module-intro { font-size: 14px; color: #666666; font-weight: normal; margin-bottom: 15px; padding: 10px; background-color: #f8f9fa; border-left: 4px solid #2ca02c; border-radius: 4px; }
+
+    /* 数据卡片的标签字体大小与颜色 */
     div[data-testid="stMetricLabel"] > div > div > p { font-size: 14px !important; color: #555555 !important; font-weight: normal !important; }
+
+    /* st.subheader 字体大小 */
     h3 { font-size: 20px !important; margin-top: 1.5rem !important; margin-bottom: 0.5rem !important; }
 </style>
 """, unsafe_allow_html=True)
 
 
-def to_excel(df):
-    """将 DataFrame 转换为 Excel 二进制流，供下载使用"""
+def to_excel(df, summary=None):
+    """将时序明细及可选的约束校核汇总写入Excel二进制流。"""
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='Sheet1')
+        df.to_excel(writer, index=False, sheet_name='时序明细')
+        if summary is not None:
+            summary.to_excel(writer, index=False, sheet_name='约束校核')
     return output.getvalue()
 
-
-def calc_tank_count(cap_tank_kg, tank_unit_kg):
-    """根据储氢容量和单罐容量计算储氢罐个数（向上取整）"""
-    if cap_tank_kg <= 0:
-        return 0
-    unit = max(float(tank_unit_kg), 1e-6)
-    return int(np.ceil(cap_tank_kg / unit))
 
 
 st.markdown("<h1 class='main-title'>🌱 柔性绿氨全生命周期智能规划平台</h1>", unsafe_allow_html=True)
 st.markdown("<h3 class='sub-title'>DeepGreen-NH3 Life-Cycle Optimization System</h3>", unsafe_allow_html=True)
 st.markdown("<br>", unsafe_allow_html=True)
+
 
 with st.sidebar:
     st.header("⚙️ 全局参数配置")
@@ -61,48 +59,37 @@ with st.sidebar:
     file_solar = st.file_uploader("上传8760h光资源 (Excel)", type=["xlsx"])
     st.divider()
 
-    st.subheader("2. 电源模式与风光边界")
-    resource_mode = st.selectbox(
-        "电源配置模式",
-        options=["风光互补", "仅风电", "仅光伏"],
-        index=0,
-        help="可选择风光联合互补，或单独评估仅风电、仅光伏场景"
-    )
-
+    st.subheader("2. 风光互补边界")
     colA, colB = st.columns(2)
     with colA:
-        wind_min_raw = st.number_input("风电下限(MW)", min_value=0.0, value=10.0)
-        solar_min_raw = st.number_input("光伏下限(MW)", min_value=0.0, value=0.0)
+        wind_min = st.number_input("风电下限(MW)", value=10.0)
+        solar_min = st.number_input("光伏下限(MW)", value=0.0)
     with colB:
-        wind_max_raw = st.number_input("风电上限(MW)", min_value=0.0, value=200.0)
-        solar_max_raw = st.number_input("光伏上限(MW)", min_value=0.0, value=100.0)
+        wind_max = st.number_input("风电上限(MW)", value=200.0)
+        solar_max = st.number_input("光伏上限(MW)", value=100.0)
 
-    if resource_mode == "仅风电":
-        wind_min, wind_max = wind_min_raw, max(wind_min_raw, wind_max_raw)
-        solar_min, solar_max = 0.0, 0.0
-        st.caption("当前模式：仅风电（光伏容量已自动设为 0 MW）")
-    elif resource_mode == "仅光伏":
-        wind_min, wind_max = 0.0, 0.0
-        solar_min, solar_max = solar_min_raw, max(solar_min_raw, solar_max_raw)
-        st.caption("当前模式：仅光伏（风电容量已自动设为 0 MW）")
-    else:
-        wind_min, wind_max = wind_min_raw, max(wind_min_raw, wind_max_raw)
-        solar_min, solar_max = solar_min_raw, max(solar_min_raw, solar_max_raw)
-
-    target_load = st.number_input("目标供电基准线 (MW)", min_value=0.1, value=50.0)
+    target_load = st.number_input("目标供电基准线 (MW)", value=50.0)
     max_shortage = st.slider("最大允许缺电率 (%)", min_value=1.0, max_value=20.0, value=10.0) / 100.0
     st.divider()
 
-    st.subheader("3. 制氢与经济评估边界")
-    green_h2_only = st.checkbox(
-        "是否全绿电制氢（可选项）",
-        value=False,
-        help="勾选后，电解制氢过程不购买电网电能（仅使用风光绿电及储能放电）"
+    st.subheader("3. 下网电与弃电约束")
+    max_grid_rate_pct = st.slider(
+        "最大允许下网电率 (%)", min_value=0.0, max_value=100.0, value=100.0, step=1.0,
+        help="下网电率=全年电网购电量/全年系统总用电量；系统总用电量按制氢、制氨和储能充电用电统计。"
     )
+    max_grid_rate = max_grid_rate_pct / 100.0
+    max_curtail_rate = st.slider(
+        "全年最大允许弃电率 (%)", min_value=0.0, max_value=100.0, value=20.0, step=1.0,
+        help="弃电率=全年弃电量/全年风光发电量；20%为可调整的界面初始值，不代表统一行业标准。"
+    ) / 100.0
+    st.divider()
+
+    st.subheader("4. 经济评估边界")
     price_nh3 = st.number_input("绿氨售价 (元/吨)", value=4500.0)
     discount_rate = st.slider("贴现率 (%)", min_value=1.0, max_value=15.0, value=8.0) / 100.0
-    project_life = st.number_input("项目生命周期 (年)", min_value=1, max_value=50, value=20)
+    project_life = st.number_input("项目生命周期 (年)", value=20)
     st.divider()
+
 
     with st.expander("🌍 LCA 碳足迹与 ISCC-EU 认证参数", expanded=True):
         st.markdown("**全生命周期排放因子**")
@@ -115,13 +102,12 @@ with st.sidebar:
 
     with st.expander("🛠️ 高级参数设置 (造价与技术指标)"):
         st.markdown("**设备与能源造价**")
-        cost_wind = st.number_input("风电单价 (元/kW)", value=4000.0)
-        cost_solar = st.number_input("光伏单价 (元/kW)", value=3000.0)
-        cost_el = st.number_input("电解槽单价 (元/kW)", value=1500.0)
-        cost_bat = st.number_input("储能单价 (元/kWh)", value=1000.0)
-        tank_unit_cap = st.number_input("单只高压储氢罐容量 (kg/个)", min_value=1.0, value=1000.0)
-        cost_tank_wan = st.number_input("高压储氢罐单价 (万元/个)", min_value=0.0, value=30.0)
-        cost_nh3 = st.number_input("合成氨装置单价 (元/(kg/h))", value=15000.0)
+        cost_wind = st.number_input("风电单价 (元/kW)", value=4000)
+        cost_solar = st.number_input("光伏单价 (元/kW)", value=3000)
+        cost_el = st.number_input("电解槽单价 (元/kW)", value=1500)
+        cost_bat = st.number_input("储能单价 (元/kWh)", value=1000)
+        cost_tank = st.number_input("高压储氢罐单价 (元/kg)", value=300)
+        cost_nh3 = st.number_input("合成氨装置单价 (元/(kg/h))", value=15000)
         cost_grid = st.number_input("电网下电电价 (元/kWh)", value=0.6)
         cost_water = st.number_input("工业用水单价 (元/吨)", value=4.0)
         om_rate = st.number_input("年度固定运维费率 (%)", value=2.0) / 100.0
@@ -132,26 +118,26 @@ with st.sidebar:
         tech_nh3_elec = st.number_input("合成氨本体耗电 (kWh/kg NH3)", value=1.0)
         tech_nh3_h2 = st.number_input("吨氨耗氢量 (kg H2/kg NH3)", value=0.177, format="%.3f")
 
-cost_tank_per_kg = (cost_tank_wan * 10000.0) / max(tank_unit_cap, 1e-6)
-COST = {
-    'wind': cost_wind,
-    'solar': cost_solar,
-    'el': cost_el,
-    'bat': cost_bat,
-    'tank_wan': cost_tank_wan,
-    'tank_unit_cap': tank_unit_cap,
-    'tank_per_kg': cost_tank_per_kg,
-    'nh3': cost_nh3,
-    'grid': cost_grid,
-    'water': cost_water
-}
-TECH = {
-    'el_eff': tech_el_eff,
-    'nh3_elec_req': tech_nh3_elec,
-    'nh3_h2_req': tech_nh3_h2,
-    'water_req': tech_water_h2,
-    'crf': (discount_rate * (1 + discount_rate) ** project_life) / ((1 + discount_rate) ** project_life - 1)
-}
+
+COST = {'wind': cost_wind, 'solar': cost_solar, 'el': cost_el, 'bat': cost_bat, 'tank': cost_tank, 'nh3': cost_nh3,
+        'grid': cost_grid, 'water': cost_water}
+TECH = {'el_eff': tech_el_eff, 'nh3_elec_req': tech_nh3_elec, 'nh3_h2_req': tech_nh3_h2, 'water_req': tech_water_h2,
+        'crf': (discount_rate * (1 + discount_rate) ** project_life) / ((1 + discount_rate) ** project_life - 1)}
+
+
+def check_operating_limits(stats):
+    """校核全年下网电率和弃电率是否满足输入上限。"""
+    violations = []
+    if stats['grid_rate'] > max_grid_rate + 1e-5:
+        violations.append(
+            f"全年下网电率 {stats['grid_rate'] * 100:.2f}%，超过上限 {max_grid_rate * 100:.2f}%"
+        )
+    if stats['curtail_rate'] > max_curtail_rate + 1e-5:
+        violations.append(
+            f"全年弃电率 {stats['curtail_rate'] * 100:.2f}%，超过上限 {max_curtail_rate * 100:.2f}%"
+        )
+    return violations
+
 
 if not file_wind or not file_solar:
     st.info("👈 请在左侧边栏上传风、光资源数据文件 (Excel格式) 以启动计算系统。")
@@ -176,14 +162,18 @@ except Exception as e:
     st.stop()
 
 
-def optimize_complementarity(cf_w, cf_s, bounds_w, bounds_s, t_load, m_shortage):
+
+
+def optimize_complementarity(cf_w, cf_s, bounds_w, bounds_s, t_load, m_shortage, m_curtail):
+    """在缺电率和弃电率双约束下进行风光装机配比寻优。"""
     def objective(x):
         cap_w, cap_s = x
         power = cap_w * cf_w + cap_s * cf_s
-        if np.sum(power) == 0:
+        total_generation = np.sum(power)
+        if total_generation <= 0:
             return 1.0
         curtailment = np.maximum(power - t_load, 0)
-        return np.sum(curtailment) / np.sum(power)
+        return np.sum(curtailment) / total_generation
 
     def constraint_shortage(x):
         cap_w, cap_s = x
@@ -192,13 +182,25 @@ def optimize_complementarity(cf_w, cf_s, bounds_w, bounds_s, t_load, m_shortage)
         shortage_rate = np.sum(shortage) / (t_load * 8760)
         return m_shortage - shortage_rate
 
+    def constraint_curtailment(x):
+        return m_curtail - objective(x)
+
     x0 = [(bounds_w[0] + bounds_w[1]) / 2, (bounds_s[0] + bounds_s[1]) / 2]
-    cons = [{'type': 'ineq', 'fun': constraint_shortage}]
-    res = minimize(objective, x0, method='SLSQP', bounds=[bounds_w, bounds_s], constraints=cons)
-    return res.x, res.fun
+    constraints = [
+        {'type': 'ineq', 'fun': constraint_shortage},
+        {'type': 'ineq', 'fun': constraint_curtailment}
+    ]
+    res = minimize(
+        objective, x0, method='SLSQP',
+        bounds=[bounds_w, bounds_s], constraints=constraints,
+        options={'maxiter': 300, 'ftol': 1e-9}
+    )
+    return res.x, objective(res.x)
 
 
-def simulate_system_app(caps, opt_wind, opt_solar, cf_w, cf_s, return_series=False, green_h2_only_flag=False):
+
+def simulate_system_app(caps, opt_wind, opt_solar, cf_w, cf_s, return_series=False):
+    """执行8760小时调度，并统计年度下网电量、下网电率及弃电率。"""
     cap_el, cap_bat, cap_tank, cap_nh3 = caps
     steps = 8760
     p_green = opt_wind * cf_w + opt_solar * cf_s
@@ -212,9 +214,9 @@ def simulate_system_app(caps, opt_wind, opt_solar, cf_w, cf_s, return_series=Fal
     m_start, m_end = month_starts[min_month], month_starts[min_month + 1]
 
     bat_soc, tank_soc = cap_bat * 0.5, cap_tank * 0.5
-    sum_h2_prod, sum_nh3_prod, sum_grid_buy = 0.0, 0.0, 0.0
-    sum_bat_dis, sum_bat_chg, sum_curtailment = 0.0, 0.0, 0.0
-    sum_el_power, sum_nh3_power = 0.0, 0.0
+    sum_h2_prod = sum_nh3_prod = sum_grid_buy = 0.0
+    sum_bat_dis = sum_bat_chg = sum_curtailment = 0.0
+    sum_el_power = sum_nh3_power = 0.0
     h2_demand_per_hour = cap_nh3 * TECH['nh3_h2_req']
     p_nh3_req = cap_nh3 * TECH['nh3_elec_req']
 
@@ -247,7 +249,7 @@ def simulate_system_app(caps, opt_wind, opt_solar, cf_w, cf_s, return_series=Fal
             dis_nh3 = min(bat_soc, deficit_nh3, cap_bat * 0.5)
             bat_soc -= dis_nh3
             dis += dis_nh3
-            grid_buy += (deficit_nh3 - dis_nh3)
+            grid_buy += deficit_nh3 - dis_nh3
             p_rem = 0.0
 
         if p_rem > 0:
@@ -262,19 +264,15 @@ def simulate_system_app(caps, opt_wind, opt_solar, cf_w, cf_s, return_series=Fal
 
         h2_prod = p_el / TECH['el_eff']
         tank_soc += h2_prod
-
-        # 若未开启全绿电制氢，氢气库存不足时允许网电补电制氢；若开启全绿电制氢，则不额外买电制氢
-        if (not green_h2_only_flag) and (tank_soc < h2_demand_per_hour):
+        if tank_soc < h2_demand_per_hour:
             h2_shortage = h2_demand_per_hour - tank_soc
             p_el_extra = h2_shortage * TECH['el_eff']
             grid_buy += p_el_extra
             p_el += p_el_extra
             tank_soc += h2_shortage
 
-        actual_h2_draw = min(tank_soc, h2_demand_per_hour)
-        tank_soc -= actual_h2_draw
-        nh3_actual_hour = actual_h2_draw / TECH['nh3_h2_req'] if TECH['nh3_h2_req'] > 0 else 0.0
-        sum_nh3_prod += nh3_actual_hour
+        tank_soc -= h2_demand_per_hour
+        sum_nh3_prod += cap_nh3
 
         if p_rem > 0:
             charge = min(p_rem, cap_bat - bat_soc)
@@ -282,11 +280,9 @@ def simulate_system_app(caps, opt_wind, opt_solar, cf_w, cf_s, return_series=Fal
             curtail = p_rem - charge
 
         if tank_soc > cap_tank:
-            curtail += (tank_soc - cap_tank) * TECH['el_eff']
             tank_soc = cap_tank
 
-        final_h2_hour = p_el / TECH['el_eff']
-        sum_h2_prod += final_h2_hour
+        sum_h2_prod += p_el / TECH['el_eff']
         sum_nh3_power += p_nh3_req
         sum_el_power += p_el
         sum_grid_buy += grid_buy
@@ -299,75 +295,132 @@ def simulate_system_app(caps, opt_wind, opt_solar, cf_w, cf_s, return_series=Fal
             arr_grid_buy[i], arr_curtail[i] = grid_buy, curtail
             arr_bat_soc[i], arr_tank_soc[i] = bat_soc, tank_soc
             arr_bat_dis[i], arr_bat_chg[i] = dis, charge
-            arr_h2_prod[i], arr_h2_cons[i] = final_h2_hour, actual_h2_draw
+            arr_h2_prod[i], arr_h2_cons[i] = p_el / TECH['el_eff'], h2_demand_per_hour
             arr_load[i] = p_el + p_nh3_req + charge
 
     sum_water_tons = sum_h2_prod * TECH['water_req'] / 1000.0
-    tank_count = calc_tank_count(cap_tank, COST['tank_unit_cap'])
-    capex_tank = tank_count * COST['tank_wan'] * 10000.0
-
     capex_total = (
-        opt_wind * COST['wind'] +
-        opt_solar * COST['solar'] +
-        cap_el * COST['el'] +
-        cap_bat * COST['bat'] +
-        capex_tank +
-        cap_nh3 * COST['nh3']
+        opt_wind * COST['wind'] + opt_solar * COST['solar'] +
+        cap_el * COST['el'] + cap_bat * COST['bat'] +
+        cap_tank * COST['tank'] + cap_nh3 * COST['nh3']
     )
     annual_cost = capex_total * TECH['crf'] + sum_grid_buy * COST['grid'] + sum_water_tons * COST['water']
-
     p_green_total = float(np.sum(p_green))
+    curtail_rate = sum_curtailment / p_green_total if p_green_total > 0 else 1.0
+    # 下网电率=全年网电购电量/全年系统总用电量（制氢+制氨+储能充电）。
+    system_total_consumption = sum_el_power + sum_nh3_power + sum_bat_chg
+    grid_rate = sum_grid_buy / system_total_consumption if system_total_consumption > 0 else 0.0
+
     energy_in = p_green_total + sum_grid_buy + sum_bat_dis
     energy_out = sum_el_power + sum_nh3_power + sum_bat_chg + sum_curtailment
-
     res = {
         'lcoa': annual_cost / sum_nh3_prod if sum_nh3_prod > 0 else float('inf'),
-        'nh3_total': sum_nh3_prod,
-        'h2_total': sum_h2_prod,
-        'water_tons': sum_water_tons,
-        'grid_buy': sum_grid_buy,
-        'bat_dis': sum_bat_dis,
-        'bat_chg': sum_bat_chg,
-        'p_green_total': p_green_total,
-        'curtailment': sum_curtailment,
-        'el_power': sum_el_power,
-        'nh3_power': sum_nh3_power,
-        'm_start': m_start,
-        'm_end': m_end,
-        'm_month': min_month + 1,
-        'tank_count': tank_count,
-        'capex_tank': capex_tank,
+        'nh3_total': sum_nh3_prod, 'h2_total': sum_h2_prod, 'water_tons': sum_water_tons,
+        'grid_buy': sum_grid_buy, 'system_total_consumption': system_total_consumption, 'grid_rate': grid_rate,
+        'bat_dis': sum_bat_dis, 'bat_chg': sum_bat_chg,
+        'p_green_total': p_green_total, 'curtailment': sum_curtailment,
+        'curtail_rate': curtail_rate,
+        'el_power': sum_el_power, 'nh3_power': sum_nh3_power,
+        'm_start': m_start, 'm_end': m_end, 'm_month': min_month + 1,
         'capex_total': capex_total,
-        'energy_in': energy_in,
-        'energy_out': energy_out,
+        'energy_in': energy_in, 'energy_out': energy_out,
         'balance_diff': abs(energy_in - energy_out)
     }
     if return_series:
         res.update({
             'arr_p_green': p_green, 'arr_p_el': arr_p_el, 'arr_p_nh3': arr_p_nh3,
-            'arr_grid_buy': arr_grid_buy, 'arr_curtail': arr_curtail, 'arr_bat_soc': arr_bat_soc,
-            'arr_tank_soc': arr_tank_soc, 'arr_bat_dis': arr_bat_dis, 'arr_bat_chg': arr_bat_chg,
+            'arr_grid_buy': arr_grid_buy, 'arr_curtail': arr_curtail,
+            'arr_bat_soc': arr_bat_soc, 'arr_tank_soc': arr_tank_soc,
+            'arr_bat_dis': arr_bat_dis, 'arr_bat_chg': arr_bat_chg,
             'arr_h2_prod': arr_h2_prod, 'arr_h2_cons': arr_h2_cons, 'arr_load': arr_load
         })
     return res
 
 
-def optimize_verification_ratio(cf_w, cf_s, fixed_caps, green_h2_only_flag=False):
-    def objective(x):
-        wind_kw, solar_kw = x
-        res = simulate_system_app(
-            fixed_caps, wind_kw, solar_kw, cf_w, cf_s,
-            return_series=False, green_h2_only_flag=green_h2_only_flag
-        )
-        return res['lcoa']
 
-    x0 = [
-        np.clip(st.session_state.get('opt_wind_kw', (wind_min + wind_max) * 500), wind_min * 1000, wind_max * 1000),
-        np.clip(st.session_state.get('opt_solar_kw', (solar_min + solar_max) * 500), solar_min * 1000, solar_max * 1000)
-    ]
+def optimize_verification_ratio(cf_w, cf_s, fixed_caps):
+    """固定模块二设备规模，在最大下网电率和最大弃电率约束下反向寻优风光装机。"""
+    cache = {'x': None, 'stats': None}
+
+    def evaluate(x):
+        x_arr = np.asarray(x, dtype=float)
+        if cache['x'] is None or not np.allclose(x_arr, cache['x'], rtol=0, atol=1e-8):
+            cache['x'] = x_arr.copy()
+            cache['stats'] = simulate_system_app(fixed_caps, x_arr[0], x_arr[1], cf_w, cf_s, return_series=False)
+        return cache['stats']
+
+    def objective(x):
+        value = evaluate(x)['lcoa']
+        return value if np.isfinite(value) else 1e30
+
+    def constraints(x):
+        stats = evaluate(x)
+        values = [
+            max_curtail_rate - stats['curtail_rate'],
+            max_grid_rate - stats['grid_rate']
+        ]
+        return np.asarray(values, dtype=float)
+
     bounds = [(wind_min * 1000, wind_max * 1000), (solar_min * 1000, solar_max * 1000)]
-    result = minimize(objective, x0, method='L-BFGS-B', bounds=bounds)
+    x0 = np.array([
+        st.session_state.get('opt_wind_kw', 100000),
+        st.session_state.get('opt_solar_kw', 50000)
+    ], dtype=float)
+    x0 = np.clip(x0, [b[0] for b in bounds], [b[1] for b in bounds])
+    result = minimize(
+        objective, x0, method='SLSQP', bounds=bounds,
+        constraints=[{'type': 'ineq', 'fun': constraints}],
+        options={'maxiter': 150, 'ftol': 1e-7, 'disp': False}
+    )
+
+    final_stats = simulate_system_app(fixed_caps, result.x[0], result.x[1], cf_w, cf_s, return_series=False)
+    violations = check_operating_limits(final_stats)
+    if violations:
+        raise ValueError("当前固定设备规模下未找到满足约束的风光配比：" + "；".join(violations) +
+                         "。请放宽下网电/弃电率限制，或调整模块二设备规模。")
     return result.x
+
+
+def optimize_engineering_scale_app(opt_w, opt_s, cf_w, cf_s):
+    """在最大下网电率和最大弃电率约束下优化设备规模。"""
+    cache = {'x': None, 'stats': None}
+
+    def evaluate(x):
+        x_arr = np.asarray(x, dtype=float)
+        if cache['x'] is None or not np.allclose(x_arr, cache['x'], rtol=0, atol=1e-8):
+            cache['x'] = x_arr.copy()
+            cache['stats'] = simulate_system_app(x_arr, opt_w, opt_s, cf_w, cf_s, return_series=False)
+        return cache['stats']
+
+    def objective(x):
+        value = evaluate(x)['lcoa']
+        return value if np.isfinite(value) else 1e30
+
+    def constraints(x):
+        stats = evaluate(x)
+        values = [
+            max_curtail_rate - stats['curtail_rate'],
+            max_grid_rate - stats['grid_rate']
+        ]
+        return np.asarray(values, dtype=float)
+
+    bounds = [(10000, 300000), (0, 500000), (1000, 200000), (100, 50000)]
+    x0 = np.array([opt_w * 0.6, opt_w * 0.2, opt_w * 0.1, opt_w * 0.05], dtype=float)
+    x0 = np.clip(x0, [b[0] for b in bounds], [b[1] for b in bounds])
+    result = minimize(
+        objective, x0, method='SLSQP', bounds=bounds,
+        constraints=[{'type': 'ineq', 'fun': constraints}],
+        options={'maxiter': 150, 'ftol': 1e-7, 'disp': False}
+    )
+
+    final_stats = simulate_system_app(result.x, opt_w, opt_s, cf_w, cf_s, return_series=False)
+    violations = check_operating_limits(final_stats)
+    if violations:
+        raise ValueError("当前资源和设备边界下未找到满足约束的设备方案：" + "；".join(violations) +
+                         "。请放宽下网电/弃电率限制，或调整风光装机、储能和设备规模边界。")
+    return result.x, final_stats, result.success, result.message
+
+
 
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
@@ -378,11 +431,10 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "🌍 5. 碳足迹与 ISCC-EU 认证"
 ])
 
+
 with tab1:
-    st.markdown(
-        "<div class='module-intro'>📌 基于当地天然风光资源的时序特性（支持风光互补、仅风电或仅光伏），以供电安全(最大缺电率)为底线，寻找使弃电率最低的最佳装机配比。</div>",
-        unsafe_allow_html=True
-    )
+    st.markdown("<div class='module-intro'>📌 基于当地天然风光资源的时序特性，以供电安全(最大缺电率)为底线，寻找使弃电率最低的最佳装机配比。</div>",
+                unsafe_allow_html=True)
 
     if st.button("▶ 运行风光互补寻优", type="primary"):
         with st.spinner("正在求解约束最佳互补配比..."):
@@ -391,21 +443,29 @@ with tab1:
             t_load = target_load * 1000
 
             opt_caps, curtail_rate = optimize_complementarity(
-                cf_wind, cf_solar, bounds_w, bounds_s, t_load, max_shortage
+                cf_wind, cf_solar, bounds_w, bounds_s, t_load, max_shortage, max_curtail_rate
             )
             opt_wind_kw, opt_solar_kw = opt_caps
             ratio = opt_wind_kw / opt_solar_kw if opt_solar_kw > 0 else float('inf')
+            total_power_check = opt_wind_kw * cf_wind + opt_solar_kw * cf_solar
+            shortage_rate_check = np.sum(np.maximum(t_load - total_power_check, 0)) / (t_load * 8760)
+            if shortage_rate_check > max_shortage + 1e-5 or curtail_rate > max_curtail_rate + 1e-5:
+                st.error(
+                    f"当前风光装机边界下无满足条件的组合：缺电率 {shortage_rate_check:.2%}，"
+                    f"弃电率 {curtail_rate:.2%}。请放宽装机边界或约束上限。"
+                )
+                st.stop()
 
             st.session_state['opt_wind_kw'] = opt_wind_kw
             st.session_state['opt_solar_kw'] = opt_solar_kw
             st.session_state['ratio_m1'] = ratio
-            st.success(f"优化完成！（当前模式：{resource_mode}）")
+            st.success("优化完成！")
 
             col1, col2, col3, col4 = st.columns(4)
             col1.metric("最优风电规模", f"{opt_wind_kw / 1000:.2f} MW")
             col2.metric("最优光伏规模", f"{opt_solar_kw / 1000:.2f} MW")
-            col3.metric("最佳风光配比", f"{ratio:.2f} : 1" if np.isfinite(ratio) else "纯风电")
-            col4.metric("基准目标弃电率", f"{curtail_rate * 100:.2f}%")
+            col3.metric("最佳风光配比", f"{ratio:.2f} : 1")
+            col4.metric("基准目标弃电率", f"{curtail_rate * 100:.2f}%", delta=f"上限 {max_curtail_rate * 100:.1f}%")
 
             fig, ax = plt.subplots(figsize=(12, 5))
             total_power = opt_wind_kw * cf_wind + opt_solar_kw * cf_solar
@@ -413,8 +473,7 @@ with tab1:
             ax.plot(time_series[:168], opt_wind_kw * cf_wind[:168] / 1000, label='风电出力', alpha=0.6)
             ax.plot(time_series[:168], opt_solar_kw * cf_solar[:168] / 1000, label='光伏出力', alpha=0.6)
             ax.axhline(y=t_load / 1000, color='red', linestyle='--', label=f'实际基准线 ({target_load} MW)')
-            ratio_text = f"{ratio:.2f}:1" if np.isfinite(ratio) else "仅风电"
-            ax.set_title(f'风光出力与基准线匹配 (首周 168小时) - {resource_mode} ({ratio_text})', fontsize=14)
+            ax.set_title(f'风光互补出力与基准线匹配 (首周 168小时)', fontsize=14)
             ax.set_ylabel('功率 (MW)')
             ax.legend(loc='upper right')
             ax.grid(True, alpha=0.3)
@@ -422,63 +481,59 @@ with tab1:
             plt.close(fig)
 
             res_df = pd.DataFrame({
-                '电源模式': [resource_mode],
                 '风电规模(MW)': [opt_wind_kw / 1000],
                 '光伏规模(MW)': [opt_solar_kw / 1000],
                 '风光配比': [ratio],
-                '弃电率': [curtail_rate]
+                '缺电率(%)': [shortage_rate_check * 100],
+                '弃电率(%)': [curtail_rate * 100],
+                '缺电率上限(%)': [max_shortage * 100],
+                '弃电率上限(%)': [max_curtail_rate * 100]
             })
-            st.download_button(
-                "📥 下载互补配比结果 (Excel)",
-                data=to_excel(res_df),
-                file_name='Module1_Ratio.xlsx',
-                mime='application/vnd.ms-excel'
-            )
+            st.download_button("📥 下载互补配比结果 (Excel)", data=to_excel(res_df), file_name='Module1_Ratio.xlsx',
+                               mime='application/vnd.ms-excel')
+
 
 with tab2:
-    st.markdown(
-        "<div class='module-intro'>📌 嵌入“电池+储氢罐”双缓冲逻辑及化工年度检修约束，精准输出最优设备容量、储氢罐个数及详细拆分的闭环电量平衡。</div>",
-        unsafe_allow_html=True
-    )
+    st.markdown("<div class='module-intro'>📌 嵌入“电池+储氢罐”双缓冲逻辑及化工年度检修约束，精准输出最优设备容量与全年水耗及电量平衡。</div>",
+                unsafe_allow_html=True)
 
     if st.button("▶ 运行全局规模寻优", type="primary", key="btn_m2"):
         if 'opt_wind_kw' not in st.session_state:
-            st.error("请先在「1. 风光互补寻优」中运行计算！")
+            st.error("请先在「风光互补配比寻优」中运行计算！")
         else:
             with st.spinner("正在进行 8760 小时时序全局仿真与规模寻优 (约耗时 10-30 秒)..."):
                 opt_w = st.session_state['opt_wind_kw']
                 opt_s = st.session_state['opt_solar_kw']
 
-                def objective_m2(x):
-                    return simulate_system_app(
-                        x, opt_w, opt_s, cf_wind, cf_solar,
-                        return_series=False, green_h2_only_flag=green_h2_only
-                    )['lcoa']
 
-                base_scale = max(opt_w + opt_s, 10000.0)
-                x0 = [base_scale * 0.6, base_scale * 0.2, base_scale * 0.1, base_scale * 0.05]
-                bounds = [(10000, 300000), (0, 500000), (1000, 200000), (100, 50000)]
-                res_m2 = minimize(objective_m2, x0, method='L-BFGS-B', bounds=bounds)
+                try:
+                    opt_caps_m2, _, optimizer_success, optimizer_message = optimize_engineering_scale_app(
+                        opt_w, opt_s, cf_wind, cf_solar
+                    )
+                    f_stats = simulate_system_app(
+                        opt_caps_m2, opt_w, opt_s, cf_wind, cf_solar, return_series=True
+                    )
+                    limit_violations = check_operating_limits(f_stats)
+                    if limit_violations:
+                        raise ValueError("最终调度结果未通过约束校核：" + "；".join(limit_violations))
+                except ValueError as exc:
+                    st.error(str(exc))
+                    st.stop()
 
-                opt_caps_m2 = res_m2.x
-                f_stats = simulate_system_app(
-                    opt_caps_m2, opt_w, opt_s, cf_wind, cf_solar,
-                    return_series=True, green_h2_only_flag=green_h2_only
-                )
+                if not optimizer_success:
+                    st.warning(f"优化器提示：{optimizer_message}。当前结果已通过约束校核，请结合工程经验复核。")
 
                 st.session_state['f_stats'] = f_stats
                 st.session_state['opt_caps_m2'] = opt_caps_m2
 
-                mode_h2_str = "全绿电制氢" if green_h2_only else "允许网电补足"
-                st.success(f"物理规模锁定！自动识别出发电低谷（第 {f_stats['m_month']} 月）作为大修期；制氢模式：{mode_h2_str}。")
+                st.success(f"物理规模锁定！自动识别出发电低谷（第 {f_stats['m_month']} 月）作为大修期。")
 
                 st.subheader("🏭 最优物理规模配置")
-                c1, c2, c3, c4, c5 = st.columns(5)
+                c1, c2, c3, c4 = st.columns(4)
                 c1.metric("电解槽总功率", f"{opt_caps_m2[0] / 1000:.2f} MW")
                 c2.metric("储能系统容量", f"{opt_caps_m2[1] / 1000:.2f} MWh")
                 c3.metric("高压储氢容量", f"{opt_caps_m2[2]:.0f} kg")
-                c4.metric("高压储氢罐个数", f"{f_stats['tank_count']} 个", delta=f"{COST['tank_unit_cap']:.0f} kg/个", delta_color="off")
-                c5.metric("合成氨额定产能", f"{opt_caps_m2[3]:.0f} kg/h")
+                c4.metric("合成氨额定产能", f"{opt_caps_m2[3]:.0f} kg/h")
 
                 st.subheader("💧 产出与资源耗用")
                 cx1, cx2, cx3 = st.columns(3)
@@ -486,29 +541,25 @@ with tab2:
                 cx2.metric("全年绿氢总产量", f"{f_stats['h2_total'] / 10000:.2f} 万kg")
                 cx3.metric("全年纯水总耗用", f"{f_stats['water_tons'] / 10000:.2f} 万吨")
 
-                st.subheader("⚡ 闭环物理电量平衡校验（详细拆分）")
-                st.markdown("**总输入电量拆分（风光绿电 + 网电 + 储能放电）**")
-                in_c1, in_c2, in_c3, in_c4 = st.columns(4)
-                in_c1.metric("风光绿电输入", f"{f_stats['p_green_total'] / 10000:.2f} 万kWh")
-                in_c2.metric("电网下电输入", f"{f_stats['grid_buy'] / 10000:.2f} 万kWh")
-                in_c3.metric("储能放电输入", f"{f_stats['bat_dis'] / 10000:.2f} 万kWh")
-                in_c4.metric("总输入电量合计", f"{f_stats['energy_in'] / 10000:.2f} 万kWh")
+                st.subheader("🚦 下网电与弃电约束校核")
+                lc1, lc2, lc3 = st.columns(3)
+                lc1.metric("全年下网电量", f"{f_stats['grid_buy'] / 10000:.2f} 万kWh")
+                lc2.metric("全年下网电率", f"{f_stats['grid_rate'] * 100:.2f}%",
+                           delta=f"上限 {max_grid_rate * 100:.1f}%")
+                lc3.metric("全年弃电率", f"{f_stats['curtail_rate'] * 100:.2f}%",
+                           delta=f"上限 {max_curtail_rate * 100:.1f}%")
 
-                st.markdown("**总消耗电量拆分（制氢 + 制氨 + 储能充电 + 弃电）**")
-                out_c1, out_c2, out_c3, out_c4, out_c5 = st.columns(5)
-                out_c1.metric("制氢耗电", f"{f_stats['el_power'] / 10000:.2f} 万kWh")
-                out_c2.metric("制氨耗电", f"{f_stats['nh3_power'] / 10000:.2f} 万kWh")
-                out_c3.metric("储能充电消耗", f"{f_stats['bat_chg'] / 10000:.2f} 万kWh")
-                out_c4.metric("弃电消耗", f"{f_stats['curtailment'] / 10000:.2f} 万kWh")
-                out_c5.metric("总消耗合计 / 守恒偏差", f"{f_stats['energy_out'] / 10000:.2f} 万kWh", delta=f"偏差 {f_stats['balance_diff']:.4f} kWh", delta_color="off")
+                st.subheader("⚡ 闭环物理电量平衡校验")
+                cb1, cb2, cb3 = st.columns(3)
+                cb1.metric("总输入能量 (风光+网电+放电)", f"{f_stats['energy_in'] / 10000:.1f} 万kWh")
+                cb2.metric("总消耗能量 (制氢+制氨+充电+弃电)", f"{f_stats['energy_out'] / 10000:.1f} 万kWh")
+                cb3.metric("闭环守恒偏差 (须趋于 0)", f"{f_stats['balance_diff']:.4f} kWh")
 
                 st.subheader("📈 宏观：全年综合出力与化工检修期智能落位 (8760 小时)")
                 fig1, ax1 = plt.subplots(figsize=(15, 4))
                 ax1.plot(time_series, f_stats['arr_p_green'] / 1000, color='#2ca02c', linewidth=0.5, label='风光综合出力')
-                ax1.axvspan(
-                    time_series[f_stats['m_start']], time_series[f_stats['m_end'] - 1],
-                    color='red', alpha=0.3, label=f'第{f_stats["m_month"]}月 化工检修停产期'
-                )
+                ax1.axvspan(time_series[f_stats['m_start']], time_series[f_stats['m_end'] - 1], color='red', alpha=0.3,
+                            label=f'第{f_stats["m_month"]}月 化工检修停产期')
                 ax1.set_ylabel('功率 (MW)')
                 ax1.legend(loc='upper right')
                 ax1.grid(True, linestyle=':', alpha=0.6)
@@ -517,8 +568,7 @@ with tab2:
 
                 st.subheader("📊 微观：微电网能量平衡与储能调度细节 (截取典型双周)")
                 p_start = 4000
-                if f_stats['m_start'] <= p_start < f_stats['m_end']:
-                    p_start = (f_stats['m_end'] + 1000) % 8760
+                if f_stats['m_start'] <= p_start < f_stats['m_end']: p_start = (f_stats['m_end'] + 1000) % 8760
                 p_end = p_start + 336
                 t_p = time_series[p_start:p_end]
 
@@ -541,20 +591,16 @@ with tab2:
 
                 ax_bal.fill_between(t_p, 0, p_nh3_mw, label='制氨耗电', color='#e377c2')
                 ax_bal.fill_between(t_p, p_nh3_mw, p_nh3_mw + p_el_mw, label='制氢耗电', color='#1f77b4')
-                ax_bal.fill_between(
-                    t_p, p_nh3_mw + p_el_mw, p_nh3_mw + p_el_mw + bat_chg_mw,
-                    label='储能充电', color='#9467bd'
-                )
+                ax_bal.fill_between(t_p, p_nh3_mw + p_el_mw, p_nh3_mw + p_el_mw + bat_chg_mw, label='储能充电',
+                                    color='#9467bd')
 
                 supply_total = (p_green_plot + grid_buy_plot + bat_dis_plot) / 1000
                 ax_bal.plot(t_p, p_green_plot / 1000, label='可用风光绿电', color='#2ca02c', linewidth=2)
                 ax_bal.plot(t_p, supply_total, label='综合供电(含网电与放电)', color='red', linestyle='--', linewidth=1.5)
 
-                ax_bal.fill_between(
-                    t_p, p_nh3_mw + p_el_mw + bat_chg_mw, supply_total,
-                    where=(supply_total > (p_nh3_mw + p_el_mw + bat_chg_mw)),
-                    color='gray', alpha=0.5, hatch='//', label='系统弃电量'
-                )
+                ax_bal.fill_between(t_p, p_nh3_mw + p_el_mw + bat_chg_mw, supply_total,
+                                    where=(supply_total > (p_nh3_mw + p_el_mw + bat_chg_mw)),
+                                    color='gray', alpha=0.5, hatch='//', label='系统弃电量')
 
                 ax_bal.set_title('微电网物理电量流向与供需平衡监控图', fontsize=14)
                 ax_bal.set_ylabel('功率 (MW)')
@@ -567,7 +613,7 @@ with tab2:
                 axA_t = axA.twinx()
                 axA_t.plot(t_p, bat_soc_plot, color='purple', lw=2, label='电池电量SOC')
                 axA_t.set_ylabel('电量 (MWh)', color='purple')
-                axA.legend(loc='upper left')
+                axA.legend(loc='upper left');
                 axA_t.legend(loc='upper right')
                 axA.set_title('微电网储能动态跟踪', fontsize=12)
 
@@ -577,7 +623,7 @@ with tab2:
                 axB_t = axB.twinx()
                 axB_t.plot(t_p, tank_soc_plot, color='brown', lw=2, linestyle='-.', label='高压储氢罐库存')
                 axB_t.set_ylabel('库存 (kg)', color='brown')
-                axB.legend(loc='upper left')
+                axB.legend(loc='upper left');
                 axB_t.legend(loc='upper right')
                 axB.set_title('管网储氢量动态跟踪', fontsize=12)
                 axB.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d'))
@@ -587,47 +633,49 @@ with tab2:
                 plt.close(fig2)
 
                 res_df_m2 = pd.DataFrame({
-                    '时间': time_series,
-                    '可用绿电(kW)': f_stats['arr_p_green'],
-                    '制氢耗电(kW)': f_stats['arr_p_el'],
-                    '制氨耗电(kW)': f_stats['arr_p_nh3'],
-                    '储能充电(kW)': f_stats['arr_bat_chg'],
-                    '储能放电(kW)': f_stats['arr_bat_dis'],
-                    '用电负荷(kW)': f_stats['arr_load'],
-                    '电网下电(kW)': f_stats['arr_grid_buy'],
-                    '系统弃电(kW)': f_stats['arr_curtail'],
-                    '电池SOC(kWh)': f_stats['arr_bat_soc'],
-                    '储氢罐SOC(kg)': f_stats['arr_tank_soc']
+                    '时间': time_series, '可用绿电(kW)': f_stats['arr_p_green'], '用电负荷(kW)': f_stats['arr_load'],
+                    '电网下电(kW)': f_stats['arr_grid_buy'], '系统弃电(kW)': f_stats['arr_curtail'],
+                    '电池SOC(kWh)': f_stats['arr_bat_soc'], '储氢罐SOC(kg)': f_stats['arr_tank_soc']
                 })
-                st.download_button(
-                    "📥 下载 8760小时时序平衡数据 (Excel)",
-                    data=to_excel(res_df_m2),
-                    file_name='Module2_8760_Dispatch.xlsx',
-                    mime='application/vnd.ms-excel'
-                )
+                summary_m2 = pd.DataFrame([{
+                    '全年下网电量(kWh)': f_stats['grid_buy'],
+                    '全年系统总用电量(kWh)': f_stats['system_total_consumption'],
+                    '全年下网电率(%)': f_stats['grid_rate'] * 100,
+                    '全年下网电率上限(%)': max_grid_rate * 100,
+                    '全年弃电量(kWh)': f_stats['curtailment'],
+                    '全年弃电率(%)': f_stats['curtail_rate'] * 100,
+                    '全年弃电率上限(%)': max_curtail_rate * 100,
+                    '约束校核': '通过'
+                }])
+                st.download_button("📥 下载 8760小时时序平衡数据 (Excel)",
+                                   data=to_excel(res_df_m2, summary_m2),
+                                   file_name='Module2_8760_Dispatch.xlsx', mime='application/vnd.ms-excel')
+
 
 with tab3:
-    st.markdown(
-        "<div class='module-intro'>📌 利用模块二锁定的化工设备规模，反算真实用电负荷，重新验证并修正最佳风光配比（同步响应电源模式及全绿电制氢选项）。</div>",
-        unsafe_allow_html=True
-    )
+    st.markdown("<div class='module-intro'>📌 利用模块二锁定的化工设备规模，反算真实用电负荷，重新验证并修正最佳风光配比。</div>", unsafe_allow_html=True)
 
     if st.button("▶ 运行刚性负荷反向验证", type="primary", key="btn_m_val"):
         if 'opt_caps_m2' not in st.session_state:
-            st.error("请先完成「2. 物理规模与调度」以锁定化工设备物理规模！")
+            st.error("请先完成「模块二」以锁定化工设备物理规模！")
         else:
             with st.spinner("正在基于刚性设备约束，反向寻优真实风光配比..."):
                 fixed_caps = st.session_state['opt_caps_m2']
-                val_wind, val_solar = optimize_verification_ratio(
-                    cf_wind, cf_solar, fixed_caps, green_h2_only_flag=green_h2_only
-                )
+                try:
+                    val_wind, val_solar = optimize_verification_ratio(cf_wind, cf_solar, fixed_caps)
+                except ValueError as exc:
+                    st.error(str(exc))
+                    st.stop()
                 val_ratio = val_wind / val_solar if val_solar > 0 else float('inf')
 
                 val_stats = simulate_system_app(
-                    fixed_caps, val_wind, val_solar, cf_wind, cf_solar,
-                    return_series=True, green_h2_only_flag=green_h2_only
+                    fixed_caps, val_wind, val_solar, cf_wind, cf_solar, return_series=True
                 )
-                m1_ratio = st.session_state.get('ratio_m1', 0.0)
+                limit_violations = check_operating_limits(val_stats)
+                if limit_violations:
+                    st.error("反向验证结果未通过约束校核：" + "；".join(limit_violations))
+                    st.stop()
+                m1_ratio = st.session_state.get('ratio_m1', 0)
 
                 st.session_state['f_stats'] = val_stats
                 st.session_state['opt_wind_kw'] = val_wind
@@ -635,15 +683,18 @@ with tab3:
                 st.success("反向验证完成！系统已完成装机修正，并应用至后续测算。")
 
                 vc1, vc2, vc3, vc4 = st.columns(4)
-                vc1.metric("自然配比 (模块一)", f"{m1_ratio:.2f} : 1" if np.isfinite(m1_ratio) else "单电源")
-                vc2.metric(
-                    "修正后真实配比",
-                    f"{val_ratio:.2f} : 1" if np.isfinite(val_ratio) else "单电源",
-                    delta=f"{val_ratio - m1_ratio:.2f}" if (np.isfinite(val_ratio) and np.isfinite(m1_ratio)) else None,
-                    delta_color="off"
-                )
+                vc1.metric("自然配比 (模块一)", f"{m1_ratio:.2f} : 1")
+                vc2.metric("修正后真实配比", f"{val_ratio:.2f} : 1", delta=f"{val_ratio - m1_ratio:.2f}", delta_color="off")
                 vc3.metric("修正后风电规模", f"{val_wind / 1000:.2f} MW")
                 vc4.metric("修正后光伏规模", f"{val_solar / 1000:.2f} MW")
+
+                st.subheader("🚦 反向验证约束校核")
+                vlim1, vlim2, vlim3 = st.columns(3)
+                vlim1.metric("全年下网电量", f"{val_stats['grid_buy'] / 10000:.2f} 万kWh")
+                vlim2.metric("全年下网电率", f"{val_stats['grid_rate'] * 100:.2f}%",
+                             delta=f"上限 {max_grid_rate * 100:.1f}%")
+                vlim3.metric("全年弃电率", f"{val_stats['curtail_rate'] * 100:.2f}%",
+                             delta=f"上限 {max_curtail_rate * 100:.1f}%")
 
                 fig_val, (v_ax1, v_ax2) = plt.subplots(1, 2, figsize=(16, 6), gridspec_kw={'width_ratios': [3, 1]})
                 p_start = 4000
@@ -655,10 +706,8 @@ with tab3:
 
                 v_ax1.plot(t_plot, p_green_plot / 1000, label='修正后总出力', color='#2ca02c', linewidth=1.5)
                 v_ax1.fill_between(t_plot, 0, p_load_plot / 1000, color='#1f77b4', alpha=0.5, label='真实负荷(化工+充电)')
-                v_ax1.fill_between(
-                    t_plot, p_load_plot / 1000, (p_load_plot + p_curtail_plot) / 1000,
-                    color='gray', alpha=0.4, hatch='//', label='系统弃电量'
-                )
+                v_ax1.fill_between(t_plot, p_load_plot / 1000, (p_load_plot + p_curtail_plot) / 1000, color='gray',
+                                   alpha=0.4, hatch='//', label='系统弃电量')
                 v_ax1.set_title('反向验证电量平衡时序图 (截取单周)', fontsize=14)
                 v_ax1.set_ylabel('功率 (MW)')
                 v_ax1.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d'))
@@ -666,65 +715,56 @@ with tab3:
                 v_ax1.grid(True, linestyle=':', alpha=0.6)
 
                 labels = ['理论自然配比', '设备约束验证配比']
-                plot_vals = [
-                    m1_ratio if np.isfinite(m1_ratio) else 0.0,
-                    val_ratio if np.isfinite(val_ratio) else 0.0
-                ]
-                bars = v_ax2.bar(labels, plot_vals, color=['#ff7f0e', '#d62728'], width=0.5)
+                bars = v_ax2.bar(labels, [m1_ratio, val_ratio], color=['#ff7f0e', '#d62728'], width=0.5)
                 v_ax2.set_title('风光配比修正对比', fontsize=14)
                 v_ax2.set_ylabel('配比比值')
                 for bar in bars:
                     yval = bar.get_height()
-                    v_ax2.text(
-                        bar.get_x() + bar.get_width() / 2, yval + 0.05,
-                        f'{yval:.2f}', ha='center', va='bottom', fontsize=12, fontweight='bold'
-                    )
+                    v_ax2.text(bar.get_x() + bar.get_width() / 2, yval + 0.05, f'{yval:.2f}', ha='center', va='bottom',
+                               fontsize=12, fontweight='bold')
 
                 st.pyplot(fig_val)
                 plt.close(fig_val)
 
-                res_df_m3 = pd.DataFrame({
-                    '电源模式': [resource_mode],
-                    '全绿电制氢': ["是" if green_h2_only else "否"],
-                    '原配比': [m1_ratio],
-                    '修正配比': [val_ratio],
-                    '验证后风电(MW)': [val_wind / 1000],
-                    '验证后光伏(MW)': [val_solar / 1000]
-                })
-                st.download_button(
-                    "📥 下载验证修正结果 (Excel)",
-                    data=to_excel(res_df_m3),
-                    file_name='Module3_Validation.xlsx',
-                    mime='application/vnd.ms-excel'
-                )
+                res_df_m3 = pd.DataFrame([{
+                    '原配比': m1_ratio,
+                    '修正配比': val_ratio,
+                    '验证后风电(MW)': val_wind / 1000,
+                    '验证后光伏(MW)': val_solar / 1000,
+                    '全年下网电量(万kWh)': val_stats['grid_buy'] / 10000,
+                    '全年系统总用电量(万kWh)': val_stats['system_total_consumption'] / 10000,
+                    '全年下网电率(%)': val_stats['grid_rate'] * 100,
+                    '全年下网电率上限(%)': max_grid_rate * 100,
+                    '全年弃电率(%)': val_stats['curtail_rate'] * 100,
+                    '全年弃电率上限(%)': max_curtail_rate * 100,
+                    '约束校核': '通过'
+                }])
+                st.download_button("📥 下载验证修正结果 (Excel)", data=to_excel(res_df_m3),
+                                   file_name='Module3_Validation.xlsx', mime='application/vnd.ms-excel')
+
 
 with tab4:
-    st.markdown(
-        "<div class='module-intro'>📌 依据系统产能、水/电能耗、储氢罐个数及贴现率，输出吨氨单耗、LCOA/NPV/IRR 指标、经济测算详表及关键参数灵敏度分析。</div>",
-        unsafe_allow_html=True
-    )
+    st.markdown("<div class='module-intro'>📌 依据系统产能、水/电能耗及贴现率，输出权威的吨氨单耗及 LCOA、NPV 等财务指标，并提供关键参数的经济效益灵敏度分析。</div>",
+                unsafe_allow_html=True)
 
-    if st.button("▶ 生成财务瀑布图、详表及报告", type="primary", key="btn_m4"):
+    if st.button("▶ 生成财务瀑布图及报告", type="primary", key="btn_m4"):
         if 'f_stats' not in st.session_state:
             st.error("请先按顺序依次运行前述模块锁定规模！")
         else:
-            with st.spinner("正在核算单耗、经济测算详表与全生命周期现金流..."):
+            with st.spinner("正在核算单耗与全生命周期现金流..."):
                 fs = st.session_state['f_stats']
                 caps = st.session_state['opt_caps_m2']
                 opt_w = st.session_state['opt_wind_kw']
                 opt_s = st.session_state['opt_solar_kw']
 
-                tank_count = calc_tank_count(caps[2], COST['tank_unit_cap'])
                 cx_w, cx_s = opt_w * COST['wind'], opt_s * COST['solar']
                 cx_el, cx_bat = caps[0] * COST['el'], caps[1] * COST['bat']
-                cx_tank = tank_count * COST['tank_wan'] * 10000.0
-                cx_nh3 = caps[3] * COST['nh3']
-
+                cx_tank, cx_nh3 = caps[2] * COST['tank'], caps[3] * COST['nh3']
                 capex_total = cx_w + cx_s + cx_el + cx_bat + cx_tank + cx_nh3
-                capex_h2_part = cx_w + cx_s + cx_el + cx_bat + cx_tank
+                capex_h2_part = cx_w + cx_s + cx_el + cx_bat
 
-                nh3_tons = fs['nh3_total'] / 1000.0
-                h2_tons = fs['h2_total'] / 1000.0
+                nh3_tons = fs['nh3_total'] / 1000
+                h2_tons = fs['h2_total'] / 1000
                 ann_rev = nh3_tons * price_nh3
                 ann_grid = fs['grid_buy'] * COST['grid']
                 ann_water = fs['water_tons'] * COST['water']
@@ -732,34 +772,31 @@ with tab4:
                 ann_opex = ann_grid + ann_water + ann_om
 
                 crf = TECH['crf']
-                lcoa = (capex_total * crf + ann_opex) / (nh3_tons * 1000) if nh3_tons > 0 else 0.0
-                lcoh = (capex_h2_part * crf) / (h2_tons * 1000) if h2_tons > 0 else 0.0
+                lcoa = (capex_total * crf + ann_opex) / (nh3_tons * 1000) if nh3_tons > 0 else 0
+                lcoh = (capex_h2_part * crf) / (h2_tons * 1000) if h2_tons > 0 else 0
 
-                life_int = int(project_life)
-                cf = [-capex_total] + [ann_rev - ann_opex] * life_int
+                cf = [-capex_total] + [ann_rev - ann_opex] * int(project_life)
                 npv = npf.npv(discount_rate, cf)
-                irr_raw = npf.irr(cf)
-                irr = irr_raw if irr_raw is not None and np.isfinite(irr_raw) else 0.0
+                irr = npf.irr(cf)
 
-                dis_cf = [-capex_total] + [
-                    (ann_rev - ann_opex) / ((1 + discount_rate) ** t) for t in range(1, life_int + 1)
-                ]
+                dis_cf = [-capex_total] + [(ann_rev - ann_opex) / (1 + discount_rate) ** t for t in
+                                           range(1, int(project_life) + 1)]
                 cum_dcf = np.cumsum(dis_cf)
 
-                pb_period = -1.0
+                pb_period = -1
                 for i in range(1, len(cum_dcf)):
                     if cum_dcf[i] >= 0:
                         pb_period = i - 1 + abs(cum_dcf[i - 1]) / dis_cf[i]
                         break
 
-                st.success("评估完成！单耗分解、经济测算详表、瀑布图及灵敏度分析已生成。")
+                st.success("评估完成！单耗分解、瀑布图及灵敏度分析已生成。")
 
                 st.subheader("📊 吨氨单耗与成本拆解")
                 tc1, tc2, tc3, tc4 = st.columns(4)
-                tc1.metric("吨氨综合电耗", f"{(fs['el_power'] + fs['nh3_power']) / nh3_tons:.0f} kWh/t" if nh3_tons > 0 else "N/A")
-                tc2.metric("吨氨综合水耗", f"{fs['water_tons'] / nh3_tons:.2f} 吨/t" if nh3_tons > 0 else "N/A")
-                tc3.metric("吨氨网电成本", f"{ann_grid / nh3_tons:.0f} 元/t" if nh3_tons > 0 else "N/A")
-                tc4.metric("吨氨折旧运维", f"{(capex_total * crf + ann_om) / nh3_tons:.0f} 元/t" if nh3_tons > 0 else "N/A")
+                tc1.metric("吨氨综合电耗", f"{(fs['el_power'] + fs['nh3_power']) / nh3_tons:.0f} kWh/t")
+                tc2.metric("吨氨综合水耗", f"{fs['water_tons'] / nh3_tons:.2f} 吨/t")
+                tc3.metric("吨氨网电成本", f"{ann_grid / nh3_tons:.0f} 元/t")
+                tc4.metric("吨氨折旧运维", f"{(capex_total * crf + ann_om) / nh3_tons:.0f} 元/t")
 
                 st.subheader("💰 宏观经济评价指标")
                 c1, c2, c3, c4 = st.columns(4)
@@ -772,38 +809,12 @@ with tab4:
                 c5.metric("平准化绿氢成本 (LCOH)", f"{lcoh:.2f} 元/kg")
                 c6.metric("净现值 (NPV)", f"{npv / 1e8:.2f} 亿元")
                 c7.metric("内部收益率 (IRR)", f"{irr * 100:.2f} %")
-                c8.metric("动态投资回收期", f"{pb_period:.2f} 年" if pb_period > 0 else f"> {life_int}年")
-
-                # 经济测算详表
-                st.subheader("📋 全生命周期经济测算详表")
-                years = np.arange(life_int + 1)
-                ann_dep_crf_wan = [0.0] + [(capex_total * crf) / 1e4] * life_int
-                rev_list_wan = [0.0] + [ann_rev / 1e4] * life_int
-                grid_list_wan = [0.0] + [ann_grid / 1e4] * life_int
-                water_list_wan = [0.0] + [ann_water / 1e4] * life_int
-                om_list_wan = [0.0] + [ann_om / 1e4] * life_int
-                opex_list_wan = [0.0] + [ann_opex / 1e4] * life_int
-                cf_list_wan = [x / 1e4 for x in cf]
-                dis_cf_list_wan = [x / 1e4 for x in dis_cf]
-                cum_dcf_list_wan = [x / 1e4 for x in cum_dcf]
-
-                detail_df = pd.DataFrame({
-                    '年份': years,
-                    '年营业收入(万元)': np.round(rev_list_wan, 2),
-                    '网电费支出(万元)': np.round(grid_list_wan, 2),
-                    '水费支出(万元)': np.round(water_list_wan, 2),
-                    '固定运维费(万元)': np.round(om_list_wan, 2),
-                    '年营运成本OPEX(万元)': np.round(opex_list_wan, 2),
-                    '年资金回收/折旧基准(万元)': np.round(ann_dep_crf_wan, 2),
-                    '净现金流(万元)': np.round(cf_list_wan, 2),
-                    '折现净现金流(万元)': np.round(dis_cf_list_wan, 2),
-                    '累计折现现金流(万元)': np.round(cum_dcf_list_wan, 2)
-                })
-                st.dataframe(detail_df, use_container_width=True, hide_index=True)
+                c8.metric("动态投资回收期", f"{pb_period:.2f} 年" if pb_period > 0 else "> 20年")
 
                 st.subheader("📈 全生命周期折现现金流模型")
                 fig3, ax3 = plt.subplots(figsize=(12, 5))
-                ax3.bar(years, np.array(dis_cf) / 1e8, color=['red'] + ['green'] * life_int, label='年度折现净现金流')
+                years = np.arange(project_life + 1)
+                ax3.bar(years, np.array(dis_cf) / 1e8, color=['red'] + ['green'] * int(project_life), label='年度折现净现金流')
                 ax3.plot(years, cum_dcf / 1e8, color='blue', marker='o', lw=2, label='累计折现现金流')
                 ax3.axhline(0, color='black', ls='--', lw=1)
                 if pb_period > 0:
@@ -815,6 +826,9 @@ with tab4:
                 st.pyplot(fig3)
                 plt.close(fig3)
 
+                # ==========================
+                # 新增：核心参数灵敏度分析
+                # ==========================
                 st.subheader("🕸️ 经济效益灵敏度分析 (Sensitivity Analysis)")
                 variations = [-0.2, -0.1, 0.0, 0.1, 0.2]
                 var_labels = ['-20%', '-10%', '0%', '+10%', '+20%']
@@ -822,25 +836,23 @@ with tab4:
                 irr_grid = []
 
                 for v in variations:
+                    # 绿氨售价变动
                     test_price = price_nh3 * (1 + v)
                     test_rev = nh3_tons * test_price
-                    test_cf_price = [-capex_total] + [test_rev - ann_opex] * life_int
-                    irr_p_val = npf.irr(test_cf_price)
-                    irr_price.append(irr_p_val * 100 if irr_p_val is not None and np.isfinite(irr_p_val) else 0.0)
+                    test_cf_price = [-capex_total] + [test_rev - ann_opex] * int(project_life)
+                    irr_price.append(npf.irr(test_cf_price) * 100 if npf.irr(test_cf_price) else 0)
 
+                    # 网电价格变动
                     test_grid_cost = fs['grid_buy'] * COST['grid'] * (1 + v)
                     test_opex = test_grid_cost + ann_water + ann_om
-                    test_cf_grid = [-capex_total] + [ann_rev - test_opex] * life_int
-                    irr_g_val = npf.irr(test_cf_grid)
-                    irr_grid.append(irr_g_val * 100 if irr_g_val is not None and np.isfinite(irr_g_val) else 0.0)
+                    test_cf_grid = [-capex_total] + [ann_rev - test_opex] * int(project_life)
+                    irr_grid.append(npf.irr(test_cf_grid) * 100 if npf.irr(test_cf_grid) else 0)
 
                 fig4, ax4 = plt.subplots(figsize=(10, 5))
                 ax4.plot(var_labels, irr_price, marker='o', linewidth=2, label='绿氨售价变化', color='#d62728')
                 ax4.plot(var_labels, irr_grid, marker='s', linewidth=2, label='网电价格变化', color='#1f77b4')
-                ax4.axhline(
-                    y=discount_rate * 100, color='gray', linestyle='--',
-                    label=f'基准折现率 ({discount_rate * 100:.0f}%)'
-                )
+                ax4.axhline(y=discount_rate * 100, color='gray', linestyle='--',
+                            label=f'基准折现率 ({discount_rate * 100:.0f}%)')
                 ax4.set_xlabel('参数变动比例 (%)', fontsize=12)
                 ax4.set_ylabel('内部收益率 IRR (%)', fontsize=12)
                 ax4.set_title('核心参数对项目 IRR 的影响分析图', fontsize=14)
@@ -849,18 +861,14 @@ with tab4:
                 st.pyplot(fig4)
                 plt.close(fig4)
 
-                st.download_button(
-                    "📥 下载全生命周期经济测算详表 (Excel)",
-                    data=to_excel(detail_df),
-                    file_name='Module4_Financials_Detail.xlsx',
-                    mime='application/vnd.ms-excel'
-                )
+                res_df_m4 = pd.DataFrame({'年份': years, '年度折现净现金流(元)': dis_cf, '累计折现现金流(元)': cum_dcf})
+                st.download_button("📥 下载生命周期现金流报表 (Excel)", data=to_excel(res_df_m4),
+                                   file_name='Module4_Financials.xlsx', mime='application/vnd.ms-excel')
+
 
 with tab5:
-    st.markdown(
-        "<div class='module-intro'>📌 严格依据 ISCC-EU RFNBO 准则，计入风光绿电基建排放与网电分摊惩罚，核算最终产品全生命周期碳减排合规性。</div>",
-        unsafe_allow_html=True
-    )
+    st.markdown("<div class='module-intro'>📌 严格依据 ISCC-EU RFNBO 准则，计入风光绿电基建排放与网电分摊惩罚，核算最终产品全生命周期碳减排合规性。</div>",
+                unsafe_allow_html=True)
 
     if st.button("▶ 进行碳足迹追溯与合规认证", type="primary", key="btn_m5"):
         if 'f_stats' not in st.session_state:
@@ -879,30 +887,28 @@ with tab5:
                 el_power = fs['el_power']
                 nh3_power = fs['nh3_power']
                 total_process_power = el_power + nh3_power
-                ratio_el = el_power / total_process_power if total_process_power > 0 else 0.0
-                ratio_nh3 = nh3_power / total_process_power if total_process_power > 0 else 0.0
+                ratio_el = el_power / total_process_power if total_process_power > 0 else 0
+                ratio_nh3 = nh3_power / total_process_power if total_process_power > 0 else 0
 
                 emissions_grid_total = fs['grid_buy'] * ef_grid
                 emissions_grid_el = emissions_grid_total * ratio_el
                 emissions_grid_nh3 = emissions_grid_total * ratio_nh3
 
                 total_emissions = emissions_green + emissions_grid_total
-                se_project = total_emissions / nh3_kg if nh3_kg > 0 else 0.0
+                se_project = total_emissions / nh3_kg if nh3_kg > 0 else 0
                 se_baseline = ef_baseline
 
-                ghg_saving_pct = ((se_baseline - se_project) / se_baseline) * 100 if se_baseline > 0 else 0.0
+                ghg_saving_pct = ((se_baseline - se_project) / se_baseline) * 100 if se_baseline > 0 else 0
                 is_compliant = ghg_saving_pct >= iscc_threshold
 
                 st.success("LCA 碳足迹计算完毕！已计入风光设备基建排碳与逐时网电溯源惩罚。")
 
                 if is_compliant:
                     st.success(
-                        f"🏅 **ISCC-EU 认证预判：通过！** 本项目减排率达到了 {ghg_saving_pct:.1f}%，已超越欧盟 RFNBO 法规要求的 {iscc_threshold}% 阈值。"
-                    )
+                        f"🏅 **ISCC-EU 认证预判：通过！** 本项目减排率达到了 {ghg_saving_pct:.1f}%，已超越欧盟 RFNBO 法规要求的 {iscc_threshold}% 阈值。")
                 else:
                     st.error(
-                        f"⚠️ **ISCC-EU 认证预判：未通过！** 本项目减排率仅为 {ghg_saving_pct:.1f}%，未达到 RFNBO 要求的 {iscc_threshold}% 阈值，建议扩建风光或储能！"
-                    )
+                        f"⚠️ **ISCC-EU 认证预判：未通过！** 本项目减排率仅为 {ghg_saving_pct:.1f}%，未达到 RFNBO 要求的 {iscc_threshold}% 阈值，建议扩建风光或储能！")
 
                 st.subheader("📊 碳足迹核心拆解指标")
                 c1, c2, c3, c4 = st.columns(4)
@@ -918,16 +924,12 @@ with tab5:
                 bars_c = c_ax1.bar(labels_c, values_c, color=['#7f7f7f', '#2ca02c'], width=0.5)
                 c_ax1.set_ylabel('碳排放强度 (kgCO$_2$eq / kgNH$_3$)', fontsize=12)
                 c_ax1.set_title(f'绿氨产品全生命周期减排效益 (减排 {ghg_saving_pct:.1f}%)', fontsize=14)
-                c_ax1.axhline(
-                    y=se_baseline * (1 - iscc_threshold / 100), color='red', linestyle='--',
-                    label=f'ISCC-EU {iscc_threshold}% 减排红线'
-                )
+                c_ax1.axhline(y=se_baseline * (1 - iscc_threshold / 100), color='red', linestyle='--',
+                              label=f'ISCC-EU {iscc_threshold}% 减排红线')
                 for bar in bars_c:
                     yval = bar.get_height()
-                    c_ax1.text(
-                        bar.get_x() + bar.get_width() / 2, yval + 0.05,
-                        f'{yval:.3f}', ha='center', va='bottom', fontsize=12, fontweight='bold'
-                    )
+                    c_ax1.text(bar.get_x() + bar.get_width() / 2, yval + 0.05, f'{yval:.3f}', ha='center', va='bottom',
+                               fontsize=12, fontweight='bold')
                 c_ax1.legend(loc='upper right')
                 c_ax1.grid(axis='y', linestyle=':', alpha=0.6)
 
@@ -935,28 +937,19 @@ with tab5:
                 pie_sizes = [emissions_green, emissions_grid_el, emissions_grid_nh3]
 
                 if sum(pie_sizes) > 0:
-                    c_ax2.pie(
-                        [x for x in pie_sizes if x > 0],
-                        labels=[l for l, x in zip(pie_labels, pie_sizes) if x > 0],
-                        autopct='%1.1f%%', startangle=90, colors=['#8c564b', '#1f77b4', '#e377c2']
-                    )
+                    c_ax2.pie([x for x in pie_sizes if x > 0],
+                              labels=[l for l, x in zip(pie_labels, pie_sizes) if x > 0],
+                              autopct='%1.1f%%', startangle=90, colors=['#8c564b', '#1f77b4', '#e377c2'])
                     c_ax2.set_title('全生命周期边界残余碳排 LCA 溯源拆解', fontsize=14)
 
                 st.pyplot(fig_carbon)
                 plt.close(fig_carbon)
 
                 res_df_m5 = pd.DataFrame({
-                    '项目绿氨碳强(kgCO2/kg)': [se_project],
-                    '灰氨基准碳强(kgCO2/kg)': [se_baseline],
-                    '减排率(%)': [ghg_saving_pct],
-                    '是否合规ISCC': ["是" if is_compliant else "否"],
-                    '风光基建LCA碳排(吨)': [emissions_green / 1000],
-                    '电解网电碳排(吨)': [emissions_grid_el / 1000],
+                    '项目绿氨碳强(kgCO2/kg)': [se_project], '灰氨基准碳强(kgCO2/kg)': [se_baseline],
+                    '减排率(%)': [ghg_saving_pct], '是否合规ISCC': ["是" if is_compliant else "否"],
+                    '风光基建LCA碳排(吨)': [emissions_green / 1000], '电解网电碳排(吨)': [emissions_grid_el / 1000],
                     '制氨网电碳排(吨)': [emissions_grid_nh3 / 1000]
                 })
-                st.download_button(
-                    "📥 下载碳足迹 LCA 认证核算报告 (Excel)",
-                    data=to_excel(res_df_m5),
-                    file_name='Module5_Carbon_LCA.xlsx',
-                    mime='application/vnd.ms-excel'
-                )
+                st.download_button("📥 下载碳足迹 LCA 认证核算报告 (Excel)", data=to_excel(res_df_m5),
+                                   file_name='Module5_Carbon_LCA.xlsx', mime='application/vnd.ms-excel')
