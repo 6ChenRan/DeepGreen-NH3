@@ -1,7 +1,7 @@
-streamlit
-pandas
-numpy
-matplotlib
-scipy
-numpy-financial
-openpyxl
+streamlit>=1.35
+pandas>=2.0
+numpy>=1.24
+scipy>=1.11
+matplotlib>=3.7
+numpy-financial>=1.0
+openpyxl>=3.1
