@@ -32,6 +32,10 @@ except FileNotFoundError:
 COST = {'wind': 4000, 'solar': 3000, 'el': 1500, 'bat': 1000, 'tank': 300, 'nh3': 15000, 'grid': 0.6, 'water': 4.0}
 TECH = {'el_eff': 50, 'nh3_elec_req': 1.0, 'nh3_h2_req': 0.177, 'water_req': 15.0, 'crf': 0.0802}
 
+# 约束参数：最大下网电率和最大弃电率均作为优化硬约束
+MAX_GRID_RATE = 1.00          # 最大允许下网电率，1.00=100%；按项目要求调整
+MAX_CURTAIL_RATE = 0.20       # 全年最大弃电率，按全年弃电量/全年风光发电量计算
+
 def load_resource_data():
     df_solar = pd.read_excel(FILE_SOLAR)
     df_wind = pd.read_excel(FILE_WIND)
@@ -41,7 +45,9 @@ def load_resource_data():
     time_series = df_solar['time'].values[:8760]
     return cf_wind, cf_solar, time_series
 
+
 def simulate_system(caps, cf_wind, cf_solar, return_series=False):
+    """8760小时物理调度仿真，并统计年度/小时下网电及弃电率。"""
     cap_el, cap_bat, cap_tank, cap_nh3 = caps
     steps = 8760
     p_green = OPT_WIND_KW * cf_wind + OPT_SOLAR_KW * cf_solar
@@ -50,18 +56,14 @@ def simulate_system(caps, cf_wind, cf_solar, return_series=False):
     month_starts = [0]
     for d in days_in_month:
         month_starts.append(month_starts[-1] + d * 24)
-
     monthly_gen = [np.sum(p_green[month_starts[m]:month_starts[m + 1]]) for m in range(12)]
-    min_month = np.argmin(monthly_gen)
-    m_start = month_starts[min_month]
-    m_end = month_starts[min_month + 1]
+    min_month = int(np.argmin(monthly_gen))
+    m_start, m_end = month_starts[min_month], month_starts[min_month + 1]
 
-    bat_soc = cap_bat * 0.5
-    tank_soc = cap_tank * 0.5
-
-    sum_h2_prod, sum_nh3_prod = 0.0, 0.0
-    sum_grid_buy, sum_bat_dis, sum_bat_chg, sum_curtailment = 0.0, 0.0, 0.0, 0.0
-    sum_el_power, sum_nh3_power = 0.0, 0.0
+    bat_soc, tank_soc = cap_bat * 0.5, cap_tank * 0.5
+    sum_h2_prod = sum_nh3_prod = 0.0
+    sum_grid_buy = sum_bat_dis = sum_bat_chg = sum_curtailment = 0.0
+    sum_el_power = sum_nh3_power = 0.0
 
     h2_demand_per_hour = cap_nh3 * TECH['nh3_h2_req']
     p_nh3_req = cap_nh3 * TECH['nh3_elec_req']
@@ -75,9 +77,7 @@ def simulate_system(caps, cf_wind, cf_solar, return_series=False):
 
     for i in range(steps):
         p_available = p_green[i]
-        is_maintenance = (m_start <= i < m_end)
-
-        if is_maintenance:
+        if m_start <= i < m_end:
             charge = min(p_available, cap_bat - bat_soc)
             bat_soc += charge
             curtail = p_available - charge
@@ -91,14 +91,14 @@ def simulate_system(caps, cf_wind, cf_solar, return_series=False):
             continue
 
         dis, charge, grid_buy, curtail, p_el = 0.0, 0.0, 0.0, 0.0, 0.0
-
         p_rem = p_available - p_nh3_req
+
         if p_rem < 0:
             deficit_nh3 = -p_rem
             dis_nh3 = min(bat_soc, deficit_nh3, cap_bat * 0.5)
             bat_soc -= dis_nh3
             dis += dis_nh3
-            grid_buy += (deficit_nh3 - dis_nh3)
+            grid_buy += deficit_nh3 - dis_nh3
             p_rem = 0.0
 
         if p_rem > 0:
@@ -132,7 +132,7 @@ def simulate_system(caps, cf_wind, cf_solar, return_series=False):
         if tank_soc > cap_tank:
             tank_soc = cap_tank
 
-        sum_h2_prod += (p_el / TECH['el_eff'])
+        sum_h2_prod += p_el / TECH['el_eff']
         sum_nh3_power += p_nh3_req
         sum_el_power += p_el
         sum_grid_buy += grid_buy
@@ -148,27 +148,33 @@ def simulate_system(caps, cf_wind, cf_solar, return_series=False):
             arr_h2_prod[i] = p_el / TECH['el_eff']
             arr_h2_cons[i] = h2_demand_per_hour
 
-
     sum_water_tons = sum_h2_prod * TECH['water_req'] / 1000.0
-
-    capex_total = (OPT_WIND_KW * COST['wind'] + OPT_SOLAR_KW * COST['solar'] +
-                   cap_el * COST['el'] + cap_bat * COST['bat'] +
-                   cap_tank * COST['tank'] + cap_nh3 * COST['nh3'])
-
+    capex_total = (
+        OPT_WIND_KW * COST['wind'] + OPT_SOLAR_KW * COST['solar'] +
+        cap_el * COST['el'] + cap_bat * COST['bat'] +
+        cap_tank * COST['tank'] + cap_nh3 * COST['nh3']
+    )
     annual_cost = capex_total * TECH['crf'] + sum_grid_buy * COST['grid'] + sum_water_tons * COST['water']
     lcoa = annual_cost / sum_nh3_prod if sum_nh3_prod > 0 else float('inf')
+    p_green_total = float(np.sum(p_green))
+    curtail_rate = sum_curtailment / p_green_total if p_green_total > 0 else 1.0
+    # 下网电率=全年网电购电量/全年系统总用电量（制氢+制氨+储能充电）。
+    system_total_consumption = sum_el_power + sum_nh3_power + sum_bat_chg
+    grid_rate = sum_grid_buy / system_total_consumption if system_total_consumption > 0 else 0.0
 
-    energy_in = np.sum(p_green) + sum_grid_buy + sum_bat_dis
+    energy_in = p_green_total + sum_grid_buy + sum_bat_dis
     energy_out = sum_el_power + sum_nh3_power + sum_bat_chg + sum_curtailment
-
     res_dict = {
         'lcoa': lcoa,
         'nh3_total': sum_nh3_prod, 'h2_total': sum_h2_prod, 'water_tons': sum_water_tons,
-        'grid_buy': sum_grid_buy, 'bat_dis': sum_bat_dis, 'bat_chg': sum_bat_chg,
-        'p_green_total': np.sum(p_green), 'curtailment': sum_curtailment,
+        'grid_buy': sum_grid_buy, 'system_total_consumption': system_total_consumption, 'grid_rate': grid_rate,
+        'bat_dis': sum_bat_dis, 'bat_chg': sum_bat_chg,
+        'p_green_total': p_green_total, 'curtailment': sum_curtailment,
+        'curtail_rate': curtail_rate,
         'el_power': sum_el_power, 'nh3_power': sum_nh3_power,
         'm_start': m_start, 'm_end': m_end, 'm_month': min_month + 1,
-        'energy_in': energy_in, 'energy_out': energy_out, 'balance_diff': abs(energy_in - energy_out)
+        'energy_in': energy_in, 'energy_out': energy_out,
+        'balance_diff': abs(energy_in - energy_out)
     }
 
     if return_series:
@@ -179,20 +185,58 @@ def simulate_system(caps, cf_wind, cf_solar, return_series=False):
             'arr_bat_dis': arr_bat_dis, 'arr_bat_chg': arr_bat_chg,
             'arr_h2_prod': arr_h2_prod, 'arr_h2_cons': arr_h2_cons
         })
-
     return res_dict
 
+
+
 def optimize_engineering_scale(cf_wind, cf_solar):
+    """在最大下网电率和最大弃电率约束下优化设备规模。"""
+    cache = {'x': None, 'stats': None}
+
+    def evaluate(x):
+        x_arr = np.asarray(x, dtype=float)
+        if cache['x'] is None or not np.allclose(x_arr, cache['x'], rtol=0, atol=1e-8):
+            cache['x'] = x_arr.copy()
+            cache['stats'] = simulate_system(x_arr, cf_wind, cf_solar, return_series=False)
+        return cache['stats']
+
     def objective(x):
-        res = simulate_system(x, cf_wind, cf_solar, return_series=False)
-        return res['lcoa']
+        value = evaluate(x)['lcoa']
+        return value if np.isfinite(value) else 1e30
 
-    x0 = [OPT_WIND_KW * 0.6, OPT_WIND_KW * 0.2, OPT_WIND_KW * 0.1, OPT_WIND_KW * 0.05]
+    def constraints(x):
+        stats = evaluate(x)
+        values = [
+            MAX_CURTAIL_RATE - stats['curtail_rate'],
+            MAX_GRID_RATE - stats['grid_rate']
+        ]
+        return np.asarray(values, dtype=float)
+
     bounds = [(10000, 300000), (0, 500000), (1000, 200000), (100, 50000)]
+    x0 = np.array([OPT_WIND_KW * 0.6, OPT_WIND_KW * 0.2,
+                   OPT_WIND_KW * 0.1, OPT_WIND_KW * 0.05], dtype=float)
+    x0 = np.clip(x0, [b[0] for b in bounds], [b[1] for b in bounds])
 
-    print("开始工程规模全局寻优 (正在进行 8760 小时包含检修期的时序计算)...")
-    result = minimize(objective, x0, method='L-BFGS-B', bounds=bounds)
+    print("开始设备规模寻优：同时校核最大允许下网电率和全年弃电率...")
+    result = minimize(
+        objective, x0, method='SLSQP', bounds=bounds,
+        constraints=[{'type': 'ineq', 'fun': constraints}],
+        options={'maxiter': 150, 'ftol': 1e-7, 'disp': False}
+    )
+
+    final_stats = simulate_system(result.x, cf_wind, cf_solar, return_series=False)
+    violations = []
+    if final_stats['curtail_rate'] > MAX_CURTAIL_RATE + 1e-5:
+        violations.append(f"弃电率 {final_stats['curtail_rate']:.2%} > 上限 {MAX_CURTAIL_RATE:.2%}")
+    if final_stats['grid_rate'] > MAX_GRID_RATE + 1e-5:
+        violations.append(f"下网电率 {final_stats['grid_rate']:.2%} > 上限 {MAX_GRID_RATE:.2%}")
+    if violations:
+        raise RuntimeError("当前约束组合下未找到可行设备规模：" + "；".join(violations) +
+                           "。请适当放宽下网电/弃电率上限，或调整风光及储能规模边界。")
+    if not result.success:
+        print(f"提示：优化器结束信息：{result.message}；最终方案已通过约束校核。")
     return result.x
+
 
 if __name__ == "__main__":
     if not os.path.exists(OUTPUT_DIR):
@@ -201,6 +245,10 @@ if __name__ == "__main__":
     cf_w, cf_s, times = load_resource_data()
     opt_caps = optimize_engineering_scale(cf_w, cf_s)
     f_stats = simulate_system(opt_caps, cf_w, cf_s, return_series=True)
+    if f_stats['curtail_rate'] > MAX_CURTAIL_RATE + 1e-5:
+        raise RuntimeError('最终设备方案未满足年度弃电率上限。')
+    if f_stats['grid_rate'] > MAX_GRID_RATE + 1e-5:
+        raise RuntimeError('最终设备方案未满足最大允许下网电率。')
     cap_el, cap_bat, cap_tank, cap_nh3 = opt_caps
 
     print("\n" + "=" * 45)
@@ -215,6 +263,9 @@ if __name__ == "__main__":
     print(f"  ▶ 全年绿氨总产量: {f_stats['nh3_total'] / 10000:.2f} 万kg")
     print(f"  ▶ 全年绿氢制取量: {f_stats['h2_total'] / 10000:.2f} 万kg")
     print(f"  ▶ 全年纯水消耗量: {f_stats['water_tons'] / 10000:.2f} 万吨")
+    print(f"  ▶ 年度下网电量: {f_stats['grid_buy'] / 10000:.2f} 万kWh")
+    print(f"  ▶ 全年下网电率: {f_stats['grid_rate'] * 100:.2f}% (上限 {MAX_GRID_RATE * 100:.2f}%)")
+    print(f"  ▶ 全年弃电率: {f_stats['curtail_rate'] * 100:.2f}% (上限 {MAX_CURTAIL_RATE * 100:.2f}%)")
 
     print("\n【3. 物理电量平衡校验】")
     print("  [输入端] = 风光绿电 + 下网电 + 储能放电")
@@ -233,7 +284,10 @@ if __name__ == "__main__":
         '全年纯水消耗(吨)': [f_stats['water_tons']],
         '制氢耗电(kWh)': [f_stats['el_power']],
         '制氨耗电(kWh)': [f_stats['nh3_power']],
-        '电网购电量(kWh)': [f_stats['grid_buy']]
+        '电网购电量(kWh)': [f_stats['grid_buy']],
+        '全年系统总用电量(kWh)': [f_stats['system_total_consumption']],
+        '全年下网电率(%)': [f_stats['grid_rate'] * 100],
+        '全年下网电率上限(%)': [MAX_GRID_RATE * 100]
     })
     excel_path = os.path.join(OUTPUT_DIR, "physical_scale.xlsx")
     result_df.to_excel(excel_path, index=False)
