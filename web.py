@@ -14,8 +14,8 @@ from model2 import (
     DEFAULT_COST, DEFAULT_TECH, optimize_engineering_scale,
     optimize_verification_ratio, simulate_system, save_dispatch_result,
 )
-from economics import calculate_economics
-from model4_carbon import calculate_carbon
+from model4_economics import calculate_economics
+from model5_carbon import calculate_carbon
 
 warnings.filterwarnings("ignore")
 plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "Arial Unicode MS"]
