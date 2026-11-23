@@ -20,7 +20,9 @@ def calculate_carbon(cf_wind, cf_solar, stats, ef_grid=EF_GRID,
     wind_gen = float(stats["wind_kw"]) * float(np.sum(cf_wind))
     solar_gen = float(stats["solar_kw"]) * float(np.sum(cf_solar))
     # 采用项目边界内全部风光发电量计入风光设备生命周期排放，含弃电部分，属于偏保守分摊。
-    emissions_green = wind_gen * ef_wind + solar_gen * ef_solar
+    emissions_wind = wind_gen * ef_wind
+    emissions_solar = solar_gen * ef_solar
+    emissions_green = emissions_wind + emissions_solar
     emissions_grid = float(stats["grid_buy"]) * ef_grid
     total_emissions = emissions_green + emissions_grid
     nh3_kg = float(stats["nh3_total"])
@@ -31,6 +33,8 @@ def calculate_carbon(cf_wind, cf_solar, stats, ef_grid=EF_GRID,
     return {
         "wind_generation_kwh": wind_gen,
         "solar_generation_kwh": solar_gen,
+        "emissions_wind_kg": emissions_wind,
+        "emissions_solar_kg": emissions_solar,
         "emissions_green_kg": emissions_green,
         "emissions_grid_kg": emissions_grid,
         "total_emissions_kg": total_emissions,
