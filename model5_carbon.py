@@ -63,7 +63,7 @@ if __name__ == "__main__":
             os.getenv("FILE_WIND", "风资源.xlsx"),
             os.getenv("FILE_SOLAR", "光资源.xlsx"))
         result = calculate_carbon(cf_w, cf_s, stats)
-        os.makedirs("model4_carbon_result", exist_ok=True)
+        os.makedirs("model5_carbon_result", exist_ok=True)
         pd.DataFrame([{
             "风光生命周期排放(吨CO2e)": result["emissions_green_kg"] / 1000,
             "网电排放(吨CO2e)": result["emissions_grid_kg"] / 1000,
@@ -73,7 +73,7 @@ if __name__ == "__main__":
             "减排率(%)": result["reduction_pct"],
             "阈值(%)": result["threshold_pct"],
             "减排预判": "达到阈值" if result["precheck_pass"] else "未达到阈值",
-        }]).to_excel("model4_carbon_result/carbon_footprint.xlsx", index=False)
+        }]).to_excel("model5_carbon_result/carbon_footprint.xlsx", index=False)
         print("碳足迹核算完成：", result)
         print("提示：该结果是所设简化系统边界下的减排预判，不等同于ISCC-EU正式认证。")
     except Exception as exc:
