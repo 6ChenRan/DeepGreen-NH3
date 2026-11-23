@@ -1,11 +1,15 @@
 # -*- coding: utf-8 -*-
-"""柔性绿氨全生命周期智能规划平台 V1.2 - 功能增强版 Web主程序"""
+"""柔性绿氨全生命周期智能规划平台 V1.3.2 - 中文字体修复版 Web主程序"""
 import io
 import warnings
 import hashlib
+import os
+from pathlib import Path
 import numpy as np
 import pandas as pd
+import matplotlib
 import matplotlib.pyplot as plt
+from matplotlib import font_manager
 import streamlit as st
 
 from model1 import load_resource_data, optimize_complementarity
@@ -13,15 +17,67 @@ from model2 import (
     DEFAULT_COST, DEFAULT_TECH, optimize_engineering_scale,
     optimize_verification_ratio, simulate_system,
 )
-from model4_economics import calculate_economics
+from economics import calculate_economics
 from model5_carbon import calculate_carbon
 
 warnings.filterwarnings("ignore")
-plt.rcParams["font.sans-serif"] = [
-    "Microsoft YaHei", "SimHei", "WenQuanYi Micro Hei",
-    "Noto Sans CJK SC", "Noto Sans CJK JP", "Arial Unicode MS", "DejaVu Sans"
-]
-plt.rcParams["axes.unicode_minus"] = False
+
+
+def configure_chinese_font():
+    """跨Windows/macOS/Linux加载中文字体，避免Matplotlib中文显示为方框。"""
+    candidates = [
+        # Linux / Streamlit Cloud：优先简体中文字体
+        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
+        # Windows
+        "C:/Windows/Fonts/msyh.ttc",
+        "C:/Windows/Fonts/msyh.ttf",
+        "C:/Windows/Fonts/simhei.ttf",
+        "C:/Windows/Fonts/simsun.ttc",
+        # macOS
+        "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/STHeiti Medium.ttc",
+        "/System/Library/Fonts/Supplemental/Songti.ttc",
+    ]
+
+    for font_file in candidates:
+        if os.path.isfile(font_file):
+            try:
+                font_manager.fontManager.addfont(font_file)
+                font_name = font_manager.FontProperties(fname=font_file).get_name()
+                plt.rcParams["font.family"] = "sans-serif"
+                plt.rcParams["font.sans-serif"] = [font_name]
+                plt.rcParams["axes.unicode_minus"] = False
+                return font_name, font_file
+            except Exception:
+                continue
+
+    # 兜底：按字体家族名检索。未安装中文字体时返回空值并在页面提示。
+    for family in ["WenQuanYi Zen Hei", "Noto Sans CJK SC", "Microsoft YaHei", "SimHei"]:
+        try:
+            font_file = font_manager.findfont(
+                font_manager.FontProperties(family=family),
+                fallback_to_default=False,
+            )
+            if font_file and os.path.isfile(font_file):
+                font_manager.fontManager.addfont(font_file)
+                font_name = font_manager.FontProperties(fname=font_file).get_name()
+                plt.rcParams["font.family"] = "sans-serif"
+                plt.rcParams["font.sans-serif"] = [font_name]
+                plt.rcParams["axes.unicode_minus"] = False
+                return font_name, font_file
+        except Exception:
+            pass
+
+    plt.rcParams["font.sans-serif"] = ["DejaVu Sans"]
+    plt.rcParams["axes.unicode_minus"] = False
+    return None, None
+
+
+CHINESE_FONT_NAME, CHINESE_FONT_PATH = configure_chinese_font()
 
 st.set_page_config(
     page_title="柔性绿氨全生命周期智能规划平台",
@@ -119,7 +175,11 @@ def evaluate_module1_case(cf_wind, cf_solar, wind_bounds, solar_bounds, target_l
 
 
 st.markdown("<h1 class='main-title'>🌱 柔性绿氨全生命周期智能规划平台</h1>", unsafe_allow_html=True)
-st.markdown("<div class='sub-title'>DeepGreen-NH3 Life-Cycle Optimization System · V1.3 绿电定价与财务评价版</div>", unsafe_allow_html=True)
+st.markdown("<div class='sub-title'>DeepGreen-NH3 Life-Cycle Optimization System · V1.3.2 中文字体修复版</div>", unsafe_allow_html=True)
+if CHINESE_FONT_NAME:
+    st.caption(f"图表中文字体已加载：{CHINESE_FONT_NAME}")
+else:
+    st.warning("未检测到可用中文字体，图表文字可能显示为方框。请确认部署目录包含 packages.txt，并重新部署安装字体。")
 
 with st.sidebar:
     st.header("⚙️ 全局参数配置")
@@ -307,8 +367,9 @@ with tab1:
         ax.plot(time_series[sl], p_s[sl]/1000, label="光伏出力", linewidth=1.8)
         ax.plot(time_series[sl], p[sl]/1000, label="风光综合出力", linewidth=2.0)
         ax.axhline(target_load_mw, color="red", linestyle="--", label="目标供电基准线")
-        ax.set_ylabel("功率(MW)")
-        ax.set_title("模块一前7日风电、光伏及综合出力")
+        ax.set_xlabel("时间")
+        ax.set_ylabel("功率（MW）")
+        ax.set_title("模块一：风电、光伏及风光合计出力（前7天）")
         ax.grid(alpha=.25)
         ax.legend(ncol=4)
         st.pyplot(fig)
@@ -432,7 +493,7 @@ with tab2:
         ax1.plot(tt, fs["arr_p_solar"][sl]/1000, label="光伏出力")
         ax1.plot(tt, fs["arr_p_green"][sl]/1000, label="风光总出力", linewidth=2)
         ax1.plot(tt, fs["arr_grid_buy"][sl]/1000, label="网电购入", linestyle="--")
-        ax1.set_ylabel("MW")
+        ax1.set_ylabel("功率（MW）")
         ax1.set_title("风电、光伏及网电购入")
         ax1.legend(ncol=4)
         ax1.grid(alpha=.2)
@@ -441,8 +502,8 @@ with tab2:
         ax2_t = ax2.twinx()
         ax2_t.plot(tt, fs["arr_bat_chg"][sl]/1000, label="充电功率")
         ax2_t.plot(tt, -fs["arr_bat_dis"][sl]/1000, label="放电功率")
-        ax2.set_ylabel("MWh")
-        ax2_t.set_ylabel("MW")
+        ax2.set_ylabel("储能量（MWh）")
+        ax2_t.set_ylabel("充放电功率（MW）")
         ax2.set_title("储能运行状态")
         ax2.legend(loc="upper left")
         ax2_t.legend(loc="upper right")
@@ -452,8 +513,8 @@ with tab2:
         ax3_t = ax3.twinx()
         ax3_t.plot(tt, fs["arr_h2_prod"][sl], label="产氢量")
         ax3_t.plot(tt, -fs["arr_h2_cons"][sl], label="耗氢量")
-        ax3.set_ylabel("kg")
-        ax3_t.set_ylabel("kg/h")
+        ax3.set_ylabel("储氢量（kg）")
+        ax3_t.set_ylabel("产耗氢速率（kg/h）")
         ax3.set_title("储氢库存与产耗氢")
         ax3.legend(loc="upper left")
         ax3_t.legend(loc="upper right")
@@ -547,11 +608,11 @@ with tab3:
         fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
         axes[0].bar(input_df["项目"], input_df["电量(kWh)"]/1e6)
         axes[0].set_title("总输入构成")
-        axes[0].set_ylabel("百万kWh")
+        axes[0].set_ylabel("电量（百万kWh）")
         axes[0].grid(axis="y", alpha=.2)
         axes[1].bar(output_df["项目"], output_df["电量(kWh)"]/1e6)
         axes[1].set_title("总消耗/去向构成")
-        axes[1].set_ylabel("百万kWh")
+        axes[1].set_ylabel("电量（百万kWh）")
         axes[1].grid(axis="y", alpha=.2)
         fig.tight_layout()
         st.pyplot(fig)
@@ -712,12 +773,12 @@ with tab5:
             cdata.get("emissions_grid_kg", 0.0)/1000,
         ])
         axes[0].set_title("排放来源构成")
-        axes[0].set_ylabel("吨CO₂e")
+        axes[0].set_ylabel("排放量（吨二氧化碳当量）")
         axes[0].grid(axis="y", alpha=.2)
 
         axes[1].bar(["灰氨基准", "本项目绿氨"], [cdata["baseline_kg_per_kg"], cdata["carbon_intensity_kg_per_kg"]])
         axes[1].set_title("单位产品碳强度对比")
-        axes[1].set_ylabel("kgCO₂e/kg NH₃")
+        axes[1].set_ylabel("单位绿氨碳排放强度（kg二氧化碳当量/kg氨）")
         axes[1].grid(axis="y", alpha=.2)
         fig.tight_layout()
         st.pyplot(fig)
