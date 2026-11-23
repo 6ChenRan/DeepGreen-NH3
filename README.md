@@ -6,8 +6,8 @@
 - `model1.py`：风光资源数据读取、风光装机互补寻优。
 - `model2.py`：统一8760小时物理调度、设备规模优化及结果导出。
 - `model3.py`：固定模块二设备规模，反向优化风光装机并重新校核。
-- `economics.py`：吨氨单耗、LCOA/LCOH、NPV、IRR和动态回收期。
-- `model4_carbon.py`：简化边界碳足迹及减排率预判。
+- `model4_economics.py`：吨氨单耗、LCOA/LCOH、NPV、IRR和动态回收期。
+- `model5_carbon.py`：简化边界碳足迹及减排率预判。
 - `requirements.txt`：运行依赖。
 - `启动Web端.bat`：Windows启动脚本。
 
@@ -158,8 +158,8 @@ python model2.py
 
 ```bash
 python model3.py
-python economics.py
-python model4_carbon.py
+python model4_economics.py
+python model5_carbon.py
 ```
 
 独立脚本的环境变量示例仅用于演示，正式测算请替换为项目真实参数。
