@@ -17,7 +17,7 @@ from model2 import (
     DEFAULT_COST, DEFAULT_TECH, optimize_engineering_scale,
     optimize_verification_ratio, simulate_system,
 )
-from economics import calculate_economics
+from model4_economics import calculate_economics
 from model5_carbon import calculate_carbon
 
 warnings.filterwarnings("ignore")
