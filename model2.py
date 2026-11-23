@@ -55,7 +55,7 @@ def select_maintenance_month(wind_kw, solar_kw, cf_wind, cf_solar):
 def simulate_system(caps, wind_kw, solar_kw, cf_wind, cf_solar,
                     cost=None, tech=None, discount_rate=0.08, project_life=20,
                     om_rate=0.02, maintenance_month=None, max_state_cycles=6,
-                    return_series=False):
+                    return_series=False, full_green_h2=False):
     """
     8760小时逐时调度。电解槽不超额定功率；氢库存不为负、不超储罐容量；
     电池SOC不越界；每小时电量守恒；电网补电不直接给电池充电。
@@ -77,7 +77,9 @@ def simulate_system(caps, wind_kw, solar_kw, cf_wind, cf_solar,
     if not (0 < eta_ch <= 1 and 0 < eta_dis <= 1 and bat_rate > 0):
         raise ValueError("电池充放电效率必须在(0,1]，功率倍率必须大于0。")
 
-    p_green = wind_kw * w + solar_kw * s
+    p_wind = wind_kw * w
+    p_solar = solar_kw * s
+    p_green = p_wind + p_solar
     if maintenance_month is None:
         maintenance_month, maintenance_mask = select_maintenance_month(wind_kw, solar_kw, w, s)
     else:
@@ -105,13 +107,15 @@ def simulate_system(caps, wind_kw, solar_kw, cf_wind, cf_solar,
         arrays = None
         if return_series:
             arrays = {k: np.zeros(8760) for k in (
-                "el", "nh3_power", "nh3_prod", "grid", "bat_ch", "bat_dis",
+                "wind", "solar", "el", "nh3_power", "nh3_prod", "grid", "bat_ch", "bat_dis",
                 "bat_soc", "tank_soc", "h2_prod", "h2_cons", "curtail",
                 "load", "bus_residual"
             )}
 
         for t in range(8760):
-            green = float(p_green[t])
+            wind_gen = float(p_wind[t])
+            solar_gen = float(p_solar[t])
+            green = wind_gen + solar_gen
             charge = discharge = grid = curtail = 0.0
             p_el = p_nh3 = nh3_rate = h2_prod = h2_cons = 0.0
 
@@ -152,6 +156,16 @@ def simulate_system(caps, wind_kw, solar_kw, cf_wind, cf_solar,
                     discharge = min(deficit, bat_power_max, bat_soc * eta_dis)
                     bat_soc -= discharge / eta_dis
                     grid = max(0.0, deficit - discharge)
+                    if full_green_h2:
+                        # 可选硬约束：电网不为制氢提供电力。若网电超过制氨负荷，则回退电解功率。
+                        grid_for_h2_upper = max(0.0, grid - p_nh3)
+                        if grid_for_h2_upper > 1e-9:
+                            reduction = min(grid_for_h2_upper, p_el)
+                            p_el -= reduction
+                            h2_prod = p_el / el_eff
+                            grid -= reduction
+                            tank_soc -= reduction / el_eff
+                            tank_soc = max(0.0, tank_soc)
 
                 bat_soc = min(cap_bat, max(0.0, bat_soc))
                 tank_soc = min(cap_tank, max(0.0, tank_soc))
@@ -169,6 +183,7 @@ def simulate_system(caps, wind_kw, solar_kw, cf_wind, cf_solar,
             residual = green + grid + discharge - p_el - p_nh3 - charge - curtail
             max_bus_error = max(max_bus_error, abs(residual))
             if arrays is not None:
+                arrays["wind"][t], arrays["solar"][t] = wind_gen, solar_gen
                 arrays["el"][t], arrays["nh3_power"][t] = p_el, p_nh3
                 arrays["nh3_prod"][t], arrays["grid"][t] = nh3_rate, grid
                 arrays["bat_ch"][t], arrays["bat_dis"][t] = charge, discharge
@@ -192,11 +207,16 @@ def simulate_system(caps, wind_kw, solar_kw, cf_wind, cf_solar,
     grid_buy, el_power, nh3_power = sums["grid"], sums["el_power"], sums["nh3_power"]
     system_total = el_power + nh3_power
     grid_rate = grid_buy / system_total if system_total > 0 else 0.0
-    p_green_total = float(p_green.sum())
+    wind_total = float(p_wind.sum())
+    solar_total = float(p_solar.sum())
+    p_green_total = wind_total + solar_total
     curtailment = sums["curtail"]
     curtail_rate = curtailment / p_green_total if p_green_total > 0 else 1.0
     bat_chg, bat_dis = sums["bat_ch"], sums["bat_dis"]
     battery_loss = bat_chg - bat_dis - delta_bat
+    grid_to_h2_upper = max(0.0, grid_buy - nh3_power)
+    h2_green_compliant = grid_to_h2_upper <= max(1e-6, el_power * 1e-6)
+    h2_green_ratio_lower = max(0.0, 1.0 - grid_to_h2_upper / max(el_power, 1.0))
 
     # 年度系统边界：风光+网电=工艺用电+弃电+电池损耗+储能期末库存变化
     energy_in = p_green_total + grid_buy
@@ -222,7 +242,10 @@ def simulate_system(caps, wind_kw, solar_kw, cf_wind, cf_solar,
         "water_tons": water_tons, "grid_buy": grid_buy,
         "system_total_consumption": system_total, "grid_rate": grid_rate,
         "curtailment": curtailment, "curtail_rate": curtail_rate,
+        "wind_total": wind_total, "solar_total": solar_total,
         "p_green_total": p_green_total, "el_power": el_power, "nh3_power": nh3_power,
+        "full_green_h2": bool(full_green_h2), "grid_to_h2_upper": grid_to_h2_upper,
+        "h2_green_compliant": h2_green_compliant, "h2_green_ratio_lower": h2_green_ratio_lower,
         "bat_chg": bat_chg, "bat_dis": bat_dis, "battery_loss": battery_loss,
         "battery_soc_start": start_bat, "battery_soc_end": end_bat,
         "tank_soc_start": start_tank, "tank_soc_end": end_tank,
@@ -239,6 +262,7 @@ def simulate_system(caps, wind_kw, solar_kw, cf_wind, cf_solar,
     }
     if return_series:
         stats.update({
+            "arr_p_wind": arrays["wind"], "arr_p_solar": arrays["solar"],
             "arr_p_green": p_green, "arr_p_el": arrays["el"],
             "arr_p_nh3": arrays["nh3_power"], "arr_nh3_prod": arrays["nh3_prod"],
             "arr_grid_buy": arrays["grid"], "arr_curtail": arrays["curtail"],
@@ -250,29 +274,40 @@ def simulate_system(caps, wind_kw, solar_kw, cf_wind, cf_solar,
     return stats
 
 
-def _constraint_values(stats, target_ton, max_grid_rate, max_curtail_rate):
+def _constraint_values(stats, target_ton, max_grid_rate, max_curtail_rate, full_green_h2=False):
     target_kg = target_ton * 1000.0
-    return np.array([
+    values = [
         max_grid_rate - stats["grid_rate"],
         max_curtail_rate - stats["curtail_rate"],
         (stats["nh3_total"] - target_kg) / max(target_kg, 1.0),
         0.005 - abs(stats["battery_cycle_delta"]) / max(stats["cap_bat"], 1.0),
         0.005 - abs(stats["tank_cycle_delta"]) / max(stats["cap_tank"], 1.0),
-    ], dtype=float)
+    ]
+    if full_green_h2:
+        values.append(1e-6 - stats["grid_to_h2_upper"] / max(stats["el_power"], 1.0))
+    return np.array(values, dtype=float)
 
 
 def optimize_engineering_scale(opt_wind_kw, opt_solar_kw, cf_wind, cf_solar,
                                target_nh3_ton, max_grid_rate, max_curtail_rate,
                                cost=None, tech=None, discount_rate=0.08,
                                project_life=20, om_rate=0.02,
-                               equipment_bounds=None, return_series=True):
+                               equipment_bounds=None, return_series=True,
+                               full_green_h2=False, maintenance_month=None):
     """固定模块一风光规模，优化电解槽、储能、储氢、合成氨四项设备规模。"""
     cost, tech = {**DEFAULT_COST, **(cost or {})}, {**DEFAULT_TECH, **(tech or {})}
     if target_nh3_ton <= 0:
         raise ValueError("目标年产绿氨量必须大于0吨/年。")
     if equipment_bounds is None:
         equipment_bounds = [(10000,300000),(0,500000),(1000,200000),(100,50000)]
-    _, maint = select_maintenance_month(opt_wind_kw, opt_solar_kw, cf_wind, cf_solar)
+    if maintenance_month is None:
+        _, maint = select_maintenance_month(opt_wind_kw, opt_solar_kw, cf_wind, cf_solar)
+    else:
+        hrs = np.array([31,28,31,30,31,30,31,31,30,31,30,31]) * 24
+        starts = np.r_[0, np.cumsum(hrs)]
+        maint = np.zeros(8760, dtype=bool)
+        mm = int(maintenance_month)
+        maint[starts[mm-1]:starts[mm]] = True
     op_hours = 8760 - int(maint.sum())
     q0 = np.clip(target_nh3_ton * 1000 / op_hours * 1.08,
                  equipment_bounds[3][0], equipment_bounds[3][1])
@@ -306,14 +341,14 @@ def optimize_engineering_scale(opt_wind_kw, opt_solar_kw, cf_wind, cf_solar,
         if key not in cache:
             cache[key] = simulate_system(
                 x,opt_wind_kw,opt_solar_kw,cf_wind,cf_solar,cost,tech,
-                discount_rate,project_life,om_rate,max_state_cycles=cycles,
-                return_series=False)
+                discount_rate,project_life,om_rate,maintenance_month=maintenance_month,
+                max_state_cycles=cycles, return_series=False, full_green_h2=full_green_h2)
         return cache[key]
     def obj(x):
         v = evaluate(x)["lcoa"]
         return v if np.isfinite(v) else 1e30
     def cons(x):
-        return _constraint_values(evaluate(x),target_nh3_ton,max_grid_rate,max_curtail_rate)
+        return _constraint_values(evaluate(x),target_nh3_ton,max_grid_rate,max_curtail_rate,full_green_h2)
     candidates, messages = [], []
     for x0 in starts:
         res = minimize(obj,x0,method="SLSQP",bounds=equipment_bounds,
@@ -322,20 +357,23 @@ def optimize_engineering_scale(opt_wind_kw, opt_solar_kw, cf_wind, cf_solar,
         messages.append(str(res.message))
         st = simulate_system(res.x,opt_wind_kw,opt_solar_kw,cf_wind,cf_solar,
                              cost,tech,discount_rate,project_life,om_rate,
-                             max_state_cycles=8,return_series=False)
-        if np.all(_constraint_values(st,target_nh3_ton,max_grid_rate,max_curtail_rate)>=-1e-5):
+                             maintenance_month=maintenance_month,
+                             max_state_cycles=8,return_series=False, full_green_h2=full_green_h2)
+        if np.all(_constraint_values(st,target_nh3_ton,max_grid_rate,max_curtail_rate,full_green_h2)>=-1e-5):
             candidates.append((st["lcoa"],res.x.copy(),res,st))
     if not candidates:
         raise ValueError(
             "当前风光资源、设备边界和运行约束下未找到可行方案。"
             f"目标年产量{target_nh3_ton:.2f}吨；下网电率上限{max_grid_rate:.2%}；"
             f"弃电率上限{max_curtail_rate:.2%}。优化器信息：{' | '.join(messages)}。"
-            "请检查风光装机规模、设备边界及约束设置。")
+            "请检查风光装机规模、设备边界及约束设置。"
+            + (" 当前已启用‘全绿电制氢’约束。" if full_green_h2 else ""))
     candidates.sort(key=lambda z:z[0])
     _,best_x,best_res,_=candidates[0]
     final_stats=simulate_system(best_x,opt_wind_kw,opt_solar_kw,cf_wind,cf_solar,
                                 cost,tech,discount_rate,project_life,om_rate,
-                                max_state_cycles=10,return_series=return_series)
+                                maintenance_month=maintenance_month,
+                                max_state_cycles=10,return_series=return_series, full_green_h2=full_green_h2)
     return best_x,final_stats,best_res.success,best_res.message
 
 
@@ -344,7 +382,8 @@ def optimize_verification_ratio(cf_wind,cf_solar,fixed_caps,original_wind_kw,
                                 max_curtail_rate,cost=None,tech=None,
                                 discount_rate=0.08,project_life=20,om_rate=0.02,
                                 wind_bounds=(10000,300000),solar_bounds=(0,200000),
-                                return_series=True, maintenance_month=None):
+                                return_series=True, maintenance_month=None,
+                                full_green_h2=False):
     """固定模块二设备规模，反向优化风光装机；检修月份沿用模块二确定的月份。"""
     cost,tech={**DEFAULT_COST,**(cost or {})},{**DEFAULT_TECH,**(tech or {})}
     if maintenance_month is None:
@@ -364,13 +403,13 @@ def optimize_verification_ratio(cf_wind,cf_solar,fixed_caps,original_wind_kw,
             cache[key]=simulate_system(fixed_caps,x[0],x[1],cf_wind,cf_solar,
                                        cost,tech,discount_rate,project_life,om_rate,
                                        maintenance_month=month,max_state_cycles=cycles,
-                                       return_series=False)
+                                       return_series=False, full_green_h2=full_green_h2)
         return cache[key]
     def obj(x):
         v=evaluate(x)["lcoa"]
         return v if np.isfinite(v) else 1e30
     def cons(x):
-        return _constraint_values(evaluate(x),target_nh3_ton,max_grid_rate,max_curtail_rate)
+        return _constraint_values(evaluate(x),target_nh3_ton,max_grid_rate,max_curtail_rate,full_green_h2)
     candidates=[]; messages=[]
     for x0 in starts:
         res=minimize(obj,x0,method="SLSQP",bounds=[wind_bounds,solar_bounds],
@@ -379,8 +418,9 @@ def optimize_verification_ratio(cf_wind,cf_solar,fixed_caps,original_wind_kw,
         messages.append(str(res.message))
         st=simulate_system(fixed_caps,res.x[0],res.x[1],cf_wind,cf_solar,
                            cost,tech,discount_rate,project_life,om_rate,
-                           maintenance_month=month,max_state_cycles=8,return_series=False)
-        if np.all(_constraint_values(st,target_nh3_ton,max_grid_rate,max_curtail_rate)>=-1e-5):
+                           maintenance_month=month,max_state_cycles=8,return_series=False,
+                           full_green_h2=full_green_h2)
+        if np.all(_constraint_values(st,target_nh3_ton,max_grid_rate,max_curtail_rate,full_green_h2)>=-1e-5):
             candidates.append((st["lcoa"],res.x.copy(),res,st))
     if not candidates:
         raise ValueError("固定设备规模后，当前风光装机边界下不存在满足约束的方案。"
@@ -390,7 +430,7 @@ def optimize_verification_ratio(cf_wind,cf_solar,fixed_caps,original_wind_kw,
     final_stats=simulate_system(fixed_caps,best_x[0],best_x[1],cf_wind,cf_solar,
                                 cost,tech,discount_rate,project_life,om_rate,
                                 maintenance_month=month,max_state_cycles=10,
-                                return_series=return_series)
+                                return_series=return_series, full_green_h2=full_green_h2)
     return float(best_x[0]),float(best_x[1]),final_stats,best_res.success,best_res.message
 
 
@@ -404,7 +444,8 @@ def save_dispatch_result(stats,output_dir="model2_result",filename="physical_sca
         "目标年产绿氨量(吨)":target_nh3_ton if target_nh3_ton is not None else stats["nh3_total"]/1000,
         "全年绿氨产量(吨)":stats["nh3_total"]/1000,"全年绿氢产量(吨)":stats["h2_total"]/1000,
         "全年纯水消耗(吨)":stats["water_tons"],"制氢耗电(kWh)":stats["el_power"],
-        "制氨耗电(kWh)":stats["nh3_power"],"全年风光发电量(kWh)":stats["p_green_total"],
+        "制氨耗电(kWh)":stats["nh3_power"],"全年风电发电量(kWh)":stats["wind_total"],
+        "全年光伏发电量(kWh)":stats["solar_total"],"全年风光发电量(kWh)":stats["p_green_total"],
         "全年电网购电量(kWh)":stats["grid_buy"],"全年系统总用电量(kWh)":stats["system_total_consumption"],
         "全年下网电率(%)":stats["grid_rate"]*100,
         "最大允许下网电率(%)":max_grid_rate*100 if max_grid_rate is not None else np.nan,
@@ -418,6 +459,9 @@ def save_dispatch_result(stats,output_dir="model2_result",filename="physical_sca
         "氢气物料平衡偏差(kg)":stats["h2_balance_diff"],
         "库存迭代收敛":"是" if stats["state_cycles_converged"] else "否",
         "库存迭代次数":stats["state_cycles_used"],"检修月份":stats["maintenance_month"],
+        "全绿电制氢约束":"是" if stats.get("full_green_h2", False) else "否",
+        "制氢绿电合规": "是" if stats.get("h2_green_compliant", False) else "否",
+        "制氢绿电比例下限(%)": stats.get("h2_green_ratio_lower", np.nan) * 100,
         "CAPEX(元)":stats["capex_total"],"年化投资(元/年)":stats["annualized_capex"],
         "年运维费(元/年)":stats["annual_om_cost"],"年网电费(元/年)":stats["annual_grid_cost"],
         "年水费(元/年)":stats["annual_water_cost"],"年总成本(元/年)":stats["annual_cost"],
@@ -428,7 +472,7 @@ def save_dispatch_result(stats,output_dir="model2_result",filename="physical_sca
         pd.DataFrame([summary]).to_excel(writer,index=False,sheet_name="工程规模与经济指标")
         if "arr_p_green" in stats:
             pd.DataFrame({
-                "小时序号":np.arange(1,8761),"风光出力(kW)":stats["arr_p_green"],
+                "小时序号":np.arange(1,8761),"风电出力(kW)":stats["arr_p_wind"],"光伏出力(kW)":stats["arr_p_solar"],"风光出力(kW)":stats["arr_p_green"],
                 "电解槽耗电(kW)":stats["arr_p_el"],"合成氨耗电(kW)":stats["arr_p_nh3"],
                 "合成氨产量(kg/h)":stats["arr_nh3_prod"],"电网购电(kW)":stats["arr_grid_buy"],
                 "电池充电(kW)":stats["arr_bat_chg"],"电池放电(kW)":stats["arr_bat_dis"],
